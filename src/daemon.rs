@@ -53,7 +53,15 @@ impl Instance {
 }
 
 pub fn validate_history(config: &Config, state: &dyn StateStore) -> Result<()> {
+    let audit_paths = config.audit_paths();
     for historical in state.historical_targets()? {
+        for path in &audit_paths {
+            ensure!(
+                !config::overlap(path, &historical.source_dir)?
+                    && !config::overlap(path, &historical.destination_dir)?,
+                "audit path overlaps historical or in-flight target data"
+            );
+        }
         ensure!(
             !config::overlap(&historical.destination_dir, &config.state_dir)?,
             "state directory overlaps a historical backup destination"
@@ -185,8 +193,8 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
     let config_path = fs::canonicalize(config_path)?;
     let mut config = config::load(&config_path)?;
     crate::resources::verify_service_limit(&config.resources)?;
-    telemetry::configure(&config.logging)?;
     let instance = Instance::open(&config)?;
+    telemetry::configure(&config.logging)?;
     instance
         .state
         .sync_schedules(&config, chrono::Utc::now().timestamp_millis())?;

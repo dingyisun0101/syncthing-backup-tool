@@ -1,6 +1,6 @@
 # syncthing-backup-tool
 
-Version **0.0.3**. A Linux service that creates full, timestamped ZIP snapshots
+Version **0.0.4**. A Linux service that creates full, timestamped ZIP snapshots
 of directories and removes older snapshots on an independent retention schedule.
 It works with any readable directory; Syncthing is a common pairing, not a dependency.
 
@@ -12,7 +12,7 @@ Requests for a busy target are skipped rather than building an unlimited backlog
 ## Install with APT
 
 The signed APT repository is hosted directly in this GitHub repository's `apt`
-branch. Release 0.0.3 provides an **amd64** package for Debian/Ubuntu systems
+branch. Release 0.0.4 provides an **amd64** package for Debian/Ubuntu systems
 with Linux **5.6 or newer**, systemd with cgroup v2, and `/proc`. The binary is statically linked
 with musl; Rust is not needed on the server.
 
@@ -37,8 +37,8 @@ APT checks signed repository metadata and package checksums; this setup uses
 `signed-by`, without disabling authentication. See [APT's authentication documentation](https://manpages.debian.org/bookworm/apt/apt-secure.8.en.html).
 
 Alternatively, download the `.deb` from the
-[v0.0.2 release](https://github.com/dingyisun0101/syncthing-backup-tool/releases/tag/v0.0.3)
-and install it with `sudo apt-get install ./syncthing-backup-tool_0.0.3_amd64.deb`.
+[v0.0.2 release](https://github.com/dingyisun0101/syncthing-backup-tool/releases/tag/v0.0.4)
+and install it with `sudo apt-get install ./syncthing-backup-tool_0.0.4_amd64.deb`.
 
 Installation creates the `syncthing-backup` service account, installs an empty
 configuration, and leaves the service stopped. Package upgrades preserve the

@@ -312,6 +312,20 @@ pub fn overlap(a: &Path, b: &Path) -> Result<bool> {
 }
 
 impl Config {
+    pub fn audit_paths(&self) -> Vec<PathBuf> {
+        self.logging
+            .audit_file
+            .as_ref()
+            .map(|path| {
+                std::iter::once(path.clone())
+                    .chain(
+                        (1..=self.logging.max_files)
+                            .map(|index| PathBuf::from(format!("{}.{}", path.display(), index))),
+                    )
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(self.config_version == 1, "unsupported config_version");
         crate::backends::Modules::from_choices(&self.backends)?;
@@ -369,8 +383,13 @@ impl Config {
                 && (1..=100).contains(&self.logging.max_files),
             "invalid log rotation limits"
         );
-        if let Some(path) = &self.logging.audit_file {
+        let audit_paths = self.audit_paths();
+        for path in &audit_paths {
             resolved(path)?;
+            ensure!(
+                !overlap(path, &self.state_dir)?,
+                "audit path overlaps state data"
+            );
         }
         let mut ids = HashSet::new();
         for t in &self.targets {
@@ -480,7 +499,7 @@ impl Config {
                     );
                 }
             }
-            if let Some(path) = &self.logging.audit_file {
+            for path in &audit_paths {
                 ensure!(
                     !overlap(path, &t.source_dir)? && !overlap(path, &t.destination_dir)?,
                     "audit path overlaps target data"

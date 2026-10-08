@@ -1,6 +1,6 @@
 # Configuration reference
 
-Version 0.0.3 accepts `config_version: 1`. Unknown fields and invalid combinations
+Version 0.0.4 accepts `config_version: 1`. Unknown fields and invalid combinations
 are rejected. The default file is `/etc/syncthing-backup-tool/config.json`;
 `--config` chooses another path. The file is limited to 1 MiB.
 
@@ -31,7 +31,7 @@ destinations or state storage. Destinations cannot overlap each other.
 | `retention.sweep_interval_seconds` | `3600` | Independent cleanup interval; 1..31536000. |
 | `logging.level` | `"info"` | `debug`, `info`, `warn`, or `error`. |
 | `logging.format` | `"json"` | `json` or `text`, written to stderr/journald. |
-| `logging.audit_file` | `null` | Absolute path for persistent JSON Lines operation logs; null writes operations to stderr. Cannot overlap source or destination data. |
+| `logging.audit_file` | `null` | Absolute path for persistent JSON Lines operation logs; null writes operations to stderr. Active and rotated paths cannot overlap state, source, destination, or historical target data. |
 | `logging.max_file_bytes` | `104857600` | Rotate the audit file at this size; at least 1 MiB. |
 | `logging.max_files` | `10` | Number of rotated audit files retained, in addition to the active file; 1..100. |
 

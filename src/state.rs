@@ -268,6 +268,7 @@ impl State {
             .map(|(s, _, _)| s.target)
             .collect();
         targets.extend(self.jobs(None)?.into_iter().map(|j| j.spec.target));
+        targets.extend(self.pending_cleanups()?.into_iter().map(|j| j.spec.target));
         Ok(targets)
     }
     pub fn register_cleanup(&self, job: &Job) -> Result<()> {

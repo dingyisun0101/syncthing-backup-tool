@@ -62,6 +62,8 @@ backups successfully. Persistent failures retain their last error in the catalog
 Progress phase `copy` includes staging/source fingerprint and checksum checks
 after rsync exits. A large tree on an HDD may spend substantial time in this phase.
 Timestamped file operations in the audit log show continuing progress.
+`verify` runs the external ZIP test, `content_verify` checks manifest entries,
+and `digest` computes the final archive checksum before publication.
 
 ## Failure recovery
 

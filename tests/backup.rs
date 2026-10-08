@@ -386,6 +386,52 @@ fn crash_during_write_removes_only_identified_temporary_file() {
 }
 
 #[test]
+fn audit_and_rotation_paths_cannot_overlap_state_or_target_data() {
+    let mut f = Fixture::new();
+    f.config.logging.audit_file = Some(f.config.state_dir.join("state.sqlite3"));
+    assert!(f.config.validate().is_err());
+    f.config.logging.audit_file = Some(f._temp.path().join("audit.jsonl"));
+    f.config.targets[0].source_dir = f._temp.path().join("audit.jsonl.1");
+    assert!(f.config.validate().is_err());
+    f.config.targets[0].source_dir = f._temp.path().join("source");
+    f.config.targets[0].destination_dir = f._temp.path().join("audit.jsonl.10");
+    assert!(f.config.validate().is_err());
+}
+
+#[test]
+fn audit_cannot_write_to_removed_target_archives_or_in_flight_sources() {
+    let f = Fixture::new();
+    fs::write(f.source().join("file"), b"protected").unwrap();
+    let instance = f.instance();
+    let snapshot = f.backup(&instance);
+    let archive = f.destination().join(snapshot.filename);
+    let original = fs::read(&archive).unwrap();
+    let mut candidate = f.config.clone();
+    candidate.targets.clear();
+    candidate.logging.audit_file = Some(archive.clone());
+    candidate.validate().unwrap();
+    assert!(daemon::validate_history(&candidate, instance.state.as_ref()).is_err());
+    drop(instance);
+    let mut status = std::process::Command::new(env!("CARGO_BIN_EXE_syncthing-backup-tool"));
+    status
+        .arg("--config")
+        .arg(f._temp.path().join("unsafe.json"))
+        .arg("retain");
+    fs::write(
+        f._temp.path().join("unsafe.json"),
+        serde_json::to_vec(&candidate).unwrap(),
+    )
+    .unwrap();
+    let output = status.output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(fs::read(&archive).unwrap(), original);
+    let instance = f.instance();
+    let job = f.job(&instance);
+    candidate.logging.audit_file = Some(job.spec.target.source_dir.join("audit.jsonl"));
+    assert!(daemon::validate_history(&candidate, instance.state.as_ref()).is_err());
+}
+
+#[test]
 fn configuration_rejects_alias_overlap_unknown_fields_and_invalid_limits() {
     let mut f = Fixture::new();
     let mut value = serde_json::to_value(&f.config).unwrap();

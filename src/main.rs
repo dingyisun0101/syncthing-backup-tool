@@ -127,10 +127,6 @@ fn execute() -> Result<()> {
         }
         command => {
             let config = config::load(&cli.config)?;
-            if !matches!(command, Command::Validate | Command::Unit) {
-                telemetry::configure(&config.logging)?;
-            }
-
             match command {
                 Command::Validate => {
                     println!("Configuration valid ({} targets)", config.targets.len());
@@ -186,6 +182,7 @@ fn execute() -> Result<()> {
                         );
                     }
                     let instance = daemon::Instance::open(&config)?;
+                    telemetry::configure(&config.logging)?;
                     instance
                         .state
                         .sync_schedules(&config, chrono::Utc::now().timestamp_millis())?;
@@ -240,6 +237,7 @@ fn execute() -> Result<()> {
                 }
                 Command::Retain => {
                     let instance = daemon::Instance::open(&config)?;
+                    telemetry::configure(&config.logging)?;
                     daemon::recover(&instance, &config)?;
                     retention::sweep(
                         instance.state.as_ref(),

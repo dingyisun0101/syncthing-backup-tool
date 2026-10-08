@@ -269,18 +269,24 @@ pub fn create_with(
                 monitor: &|| destination.check(),
             })
         })?;
-        verify(
-            File::open(&archive_path)?,
-            &job.spec.resources,
-            Some(&job.id),
-            Some(&job.spec.target),
-            cancel,
-        )?;
-        let hash = digest(
-            File::open(&archive_path)?,
-            job.spec.resources.io_buffer_bytes,
-            cancel,
-        )?;
+        state.progress(&job.id, "content_verify")?;
+        telemetry::operation("archive.verify", serde_json::json!({}), || {
+            verify(
+                File::open(&archive_path)?,
+                &job.spec.resources,
+                Some(&job.id),
+                Some(&job.spec.target),
+                cancel,
+            )
+        })?;
+        state.progress(&job.id, "digest")?;
+        let hash = telemetry::operation("archive.digest", serde_json::json!({}), || {
+            digest(
+                File::open(&archive_path)?,
+                job.spec.resources.io_buffer_bytes,
+                cancel,
+            )
+        })?;
         File::open(&archive_path)?.sync_all()?;
         source.check()?;
         destination.check_space(0)?;
