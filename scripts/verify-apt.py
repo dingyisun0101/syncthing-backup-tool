@@ -10,7 +10,7 @@ import urllib.request
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--repo-url", default="https://raw.githubusercontent.com/dingyisun0101/syncthing-backup-tool/apt/")
-parser.add_argument("--version", default="0.0.1")
+parser.add_argument("--version", default="0.0.2")
 parser.add_argument("--fingerprint", required=True)
 parser.add_argument("--expected-package", type=pathlib.Path)
 args = parser.parse_args()

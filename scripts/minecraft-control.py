@@ -20,43 +20,64 @@ minecraft_hook=importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(minecraft_hook)
 
 
+def handle(connection, args, servers):
+    output = io.StringIO()
+    try:
+        connection.settimeout(10)
+        data = bytearray()
+        while len(data) <= 4096:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > 4096:
+            raise ValueError('oversized control request')
+        request = json.loads(data)
+        job = str(uuid.UUID(request['job_id']))
+        server = servers[request['server']]
+        phase = request['phase']
+        if phase not in ('prepare', 'resume'):
+            raise ValueError('unsupported action')
+        os.environ['BACKUP_JOB_ID'] = job
+        state = args.state_dir / request['server']
+        options = types.SimpleNamespace(
+            server_dir=pathlib.Path(server['directory']), state_dir=state,
+            phase=phase, mcrcon=server.get('mcrcon', '/usr/local/bin/mcrcon'),
+            command_timeout=20,
+            simulate_save_failure=bool(request.get('simulate_save_failure', False)))
+        with contextlib.redirect_stdout(output):
+            minecraft_hook.run(options)
+        if phase == 'prepare':
+            # save-all can replace files with mode 0600. The owner grants
+            # the backup identity read access while saves are paused.
+            world = pathlib.Path(server['directory']) / server['world']
+            subprocess.run(
+                ['setfacl', '-R', '-P', '-m', 'u:syncthing-backup:rX', str(world)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                timeout=45)
+        result = {'ok': True, 'output': output.getvalue()}
+    except Exception as error:
+        result = {'ok': False, 'error': str(error), 'output': output.getvalue()}
+    try:
+        connection.sendall(json.dumps(result).encode() + b'\n')
+    except OSError:
+        # A cancelled/timed-out client must not stop cleanup for later jobs.
+        minecraft_hook.event('minecraft.control', 'disconnected')
+
+
 def serve(args):
-    servers=json.loads(args.config.read_text())['servers']
-    args.socket.parent.mkdir(mode=0o750,parents=True,exist_ok=True)
-    if args.socket.exists():args.socket.unlink()
-    listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-    listener.bind(str(args.socket));os.chmod(args.socket,0o660);listener.listen(8)
-    while True:
-        connection,_=listener.accept()
-        with connection:
-            connection.settimeout(10);data=bytearray()
-            while len(data)<=4096:
-                chunk=connection.recv(4096)
-                if not chunk:break
-                data.extend(chunk)
-            output=io.StringIO()
-            try:
-                request=json.loads(data)
-                job=str(uuid.UUID(request['job_id']))
-                server=servers[request['server']]
-                phase=request['phase']
-                if phase not in ('prepare','resume'):raise ValueError('unsupported action')
-                os.environ['BACKUP_JOB_ID']=job
-                state=args.state_dir/request['server']
-                options=types.SimpleNamespace(server_dir=pathlib.Path(server['directory']),state_dir=state,
-                    phase=phase,mcrcon=server.get('mcrcon','/usr/local/bin/mcrcon'),command_timeout=20,
-                    simulate_save_failure=bool(request.get('simulate_save_failure',False)))
-                with contextlib.redirect_stdout(output):minecraft_hook.run(options)
-                if phase=='prepare':
-                    # save-all can replace files with mode 0600. The owner grants
-                    # the backup identity read access while saves are paused.
-                    world=pathlib.Path(server['directory'])/server['world']
-                    subprocess.run(['setfacl','-R','-P','-m','u:syncthing-backup:rX',str(world)],
-                                   check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
-                result={'ok':True,'output':output.getvalue()}
-            except Exception as error:
-                result={'ok':False,'error':str(error),'output':output.getvalue()}
-            connection.sendall(json.dumps(result).encode()+b'\n')
+    servers = json.loads(args.config.read_text())['servers']
+    args.socket.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    if args.socket.exists():
+        args.socket.unlink()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(args.socket))
+        os.chmod(args.socket, 0o660)
+        listener.listen(8)
+        while True:
+            connection, _ = listener.accept()
+            with connection:
+                handle(connection, args, servers)
 
 
 def request(args):

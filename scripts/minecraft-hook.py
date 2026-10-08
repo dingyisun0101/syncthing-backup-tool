@@ -78,12 +78,15 @@ def run(args):
             raise RuntimeError("mcrcon is not installed")
         if args.phase == "prepare":
             # Record recovery obligation before making any application-state change.
-            lease = {"job_id": job, "resume": True, "server": str(server)}
-            write_lease(lease_path, lease)
+            new_lease = lease is None
+            if new_lease:
+                lease = {"job_id": job, "resume": True, "server": str(server)}
+                write_lease(lease_path, lease)
             reply = command(args, properties, "save-off").lower()
             if "already" in reply and ("off" in reply or "disabled" in reply):
-                lease["resume"] = False
-                write_lease(lease_path, lease)
+                if new_lease:
+                    lease["resume"] = False
+                    write_lease(lease_path, lease)
             elif "disabled" not in reply:
                 raise RuntimeError("server did not acknowledge save-off")
             event("minecraft.save_off", "succeeded")

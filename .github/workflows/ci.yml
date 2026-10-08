@@ -19,6 +19,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --locked
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - run: scripts/build-deb.sh
       - uses: actions/upload-artifact@v4
         with:

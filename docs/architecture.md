@@ -1,6 +1,6 @@
 # Architecture
 
-Status: architecture of version 0.0.1. The implementation follows the module
+Status: architecture of version 0.0.2. The implementation follows the module
 boundaries below; later extensions and current limits are identified explicitly.
 
 ## 1. Purpose and scope
@@ -69,6 +69,7 @@ src/
   archive.rs       # ZIP tool backend and canonical verification
   snapshot.rs      # Compose one capture through module interfaces
   process.rs       # Supervise rsync/zip/unzip tool process groups
+  hooks.rs         # Hook phases, script execution, and durable cleanup recovery
   storage.rs       # Destination checks, publication, and safe removal
   retention.rs     # Selection of expired snapshots
   state.rs         # Durable job journal and snapshot catalog
@@ -77,10 +78,11 @@ src/
 
 | Module | Responsibility and boundary |
 | --- | --- |
-| `main` | Parse `--config PATH`, defaulting to `/etc/syncthing-backup-tool/config.json`; expose validation, one-shot backup/retention, explicit reload, status, and service-unit generation; invoke the library. |
+| `main` | Parse `--config PATH`, defaulting to `/etc/syncthing-backup-tool/config.json`; expose validation, one-shot backup/retention, immediate trigger/job commands, explicit reload, status, and service-unit generation; invoke the library. |
 | `api` / `backends` | Define the standard module contracts and assemble selected implementations. See [modules.md](modules.md) for replacement/injection rules. |
 | `snapshot` | Coordinate source inspection, rsync staging, ZIP packing/testing, canonical verification, and durable publication through interfaces. |
 | `process` | Spawn tools without a shell, enforce per-process limits, monitor capacity/cancellation, bound diagnostics, and terminate/reap process groups. |
+| `hooks` | Execute configured phases through `ScriptRunner`; persist mandatory finally obligations before preparation, and recover failed cleanup without interfering with active jobs. |
 | `domain` | Define `Job`, captured `JobSpec`, `Snapshot`, `Manifest`, entry fingerprints, and permanent errors. Identifiers are strings; durable state transitions live in `state`. |
 | `config` | Deserialize a versioned `config.json`, apply documented defaults, reject unknown fields, and validate paths, policies, and resource bounds. Return immutable configuration. |
 | `daemon` | Own application lifetime: acquire the instance lock, open state, recover interrupted work, start scheduling and dispatch, handle signals, and coordinate shutdown. |

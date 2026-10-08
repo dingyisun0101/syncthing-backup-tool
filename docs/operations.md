@@ -11,6 +11,8 @@ Configure it, take a one-shot backup, then enable it as described in the README.
 | `run` (or no subcommand) | Foreground daemon, usually managed by systemd. |
 | `validate` | Check JSON, ranges, exclusions, and path separation without creating state/archive files. |
 | `backup --target ID` | Create one snapshot; omit target for all enabled targets. Requires the daemon to be stopped for that state directory. |
+| `trigger --target ID --wait` | Request an immediate backup from the running daemon; omit target for all enabled targets. Waiting reports skipped/failed jobs as nonzero. |
+| `job JOB_ID` | Read a job's progress or durable terminal result. The latest 1000 terminal results are retained. |
 | `retain` | Execute one cleanup sweep against recorded policies, with the daemon stopped. |
 | `reload` | Ask the running daemon to reread its original config path; failure retains loaded settings. |
 | `status` | Read loaded service state, next deadlines, outstanding counts, last error, snapshot counts/bytes, and age of last successful capture. |
@@ -20,7 +22,9 @@ Configure it, take a one-shot backup, then enable it as described in the README.
 is `/run/syncthing-backup-tool/control.sock`, accessible to root and the service
 account. For a foreground development instance, choose a private writable socket
 path and pass it to `run`, `reload`, and `status`. `reload`/`status` do not load the
-client's JSON file; they contact the daemon. No file watcher or reload signal is used.
+client's JSON file; they contact the daemon. `trigger` and `job` use this same socket.
+No file watcher or reload signal is used. `trigger --timeout-seconds N` limits
+client waiting without cancelling the service's queued/running work.
 
 `systemctl reload` invokes the same explicit reload command. A systemd
 `daemon-reload` only refreshes service-unit definitions; it does not refresh
@@ -49,6 +53,15 @@ backups successfully. Persistent failures retain their last error in the catalog
   or adjust explicit limits. Keep space for a new ZIP alongside retained archives.
 - **Invalid reload:** correct the reported field and rerun `reload`; the old
   configuration is still active. Worker resource changes may need an idle period.
+- **Skipped backup:** inspect the before-hook error in `job` and audit logs. A
+  failed save acknowledgement skips capture when configured with `skip_backup`.
+- **Cleanup pending:** repair the mandatory finally hook or its application
+  dependency. Recovery keeps retrying cleanup; the target remains blocked until
+  cleanup succeeds. A published archive is preserved if a later hook fails.
+
+Progress phase `copy` includes staging/source fingerprint and checksum checks
+after rsync exits. A large tree on an HDD may spend substantial time in this phase.
+Timestamped file operations in the audit log show continuing progress.
 
 ## Failure recovery
 

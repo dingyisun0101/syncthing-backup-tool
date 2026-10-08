@@ -19,6 +19,8 @@ selected only by `backends::Modules` and `state::open`, not by peer modules.
 | `SchedulingPolicy` | `scheduler::Interval` | Calculate the next deadline from explicit previous/current timestamps. |
 | `QueuePolicy` | `queue::BoundedFifo` | Decide admission and retry deadlines without doing filesystem or database I/O. |
 | `RetentionPolicy` | `retention::OldestFirst` | Produce an oldest-first deletion plan subject to recorded limits and the minimum. |
+| `ScriptRunner` | `hooks::LocalProcess` | Run a bounded hook and report success, failure, timeout, or cancellation. |
+| `EventSink` | `telemetry` JSON Lines writer | Persist timestamped operation events with bounded log rotation. |
 
 `config::load(Path) -> Result<Config>` is the configuration-reader API.
 `resources::MemoryBudget` exposes bounded `entry` reservations and a manifest
@@ -58,7 +60,8 @@ locks through the session interface.
 
 State mutations must be durable before returning. Enqueue must enforce one
 outstanding request per target even under concurrent callers; commitment must
-atomically update the snapshot catalog and finish its job. Deletion intention
+atomically update the snapshot catalog and mark its job for post-processing.
+Terminal completion follows required post-backup/finally hooks. Deletion intention
 and deletion completion are separate operations. `catalog` returns
 `(snapshot, healthy, deleting)` records; only healthy survivors protect retention.
 

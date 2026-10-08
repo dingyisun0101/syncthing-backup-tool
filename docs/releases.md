@@ -27,7 +27,7 @@ Signing-key fingerprint: **`6872B71D4A81920AF5D4B1D04D12FAACD2545826`**.
 sudo apt-get install build-essential musl-tools python3 dpkg-dev gnupg rsync zip unzip util-linux
 rustup target add x86_64-unknown-linux-musl
 scripts/build-deb.sh
-dpkg-deb --info dist/syncthing-backup-tool_0.0.1_amd64.deb
+dpkg-deb --info dist/syncthing-backup-tool_0.0.2_amd64.deb
 ```
 
 The script builds locked dependencies, uses a static musl binary, installs
@@ -70,7 +70,7 @@ source lists or install packages:
 ```bash
 python3 scripts/verify-apt.py \
   --fingerprint 6872B71D4A81920AF5D4B1D04D12FAACD2545826 \
-  --expected-package dist/syncthing-backup-tool_0.0.1_amd64.deb
+  --expected-package dist/syncthing-backup-tool_0.0.2_amd64.deb
 ```
 
 Tag the tested source and upload the package/checksums/public key to its GitHub

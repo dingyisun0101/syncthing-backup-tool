@@ -6,7 +6,7 @@ It works with any readable directory; Syncthing is a common pairing, not a depen
 
 The service delegates copying to `rsync`, compression to `zip`, and ZIP testing
 to `unzip`. It stages data on the backup drive, verifies archives before publication,
-and contain a manifest with file checksums and their original retention policy.
+and includes a manifest with file checksums and its original retention policy.
 Requests for a busy target are skipped rather than building an unlimited backlog.
 
 ## Install with APT
@@ -255,6 +255,8 @@ phases. Before-hook errors can skip, retry, fail, or explicitly continue. Mandat
 cleanup obligations survive crashes and block further work on the target until
 recovered. See [hook contracts](docs/hooks.md) and the packaged Minecraft helper
 at `/usr/lib/syncthing-backup-tool/minecraft-hook.py`.
+For owner-only Minecraft save files, use the optional owner-side controller
+described in [Minecraft setup](docs/minecraft.md).
 
 Set `logging.audit_file` to `/var/log/syncthing-backup-tool/operations.jsonl` for
 persistent timestamped operation/file logs. `max_file_bytes` and `max_files`

@@ -1,6 +1,6 @@
 # Configuration reference
 
-Version 0.0.1 accepts `config_version: 1`. Unknown fields and invalid combinations
+Version 0.0.2 accepts `config_version: 1`. Unknown fields and invalid combinations
 are rejected. The default file is `/etc/syncthing-backup-tool/config.json`;
 `--config` chooses another path. The file is limited to 1 MiB.
 
@@ -31,6 +31,9 @@ destinations or state storage. Destinations cannot overlap each other.
 | `retention.sweep_interval_seconds` | `3600` | Independent cleanup interval; 1..31536000. |
 | `logging.level` | `"info"` | `debug`, `info`, `warn`, or `error`. |
 | `logging.format` | `"json"` | `json` or `text`, written to stderr/journald. |
+| `logging.audit_file` | `null` | Absolute path for persistent JSON Lines operation logs; null writes operations to stderr. Cannot overlap source or destination data. |
+| `logging.max_file_bytes` | `104857600` | Rotate the audit file at this size; at least 1 MiB. |
+| `logging.max_files` | `10` | Number of rotated audit files retained, in addition to the active file; 1..100. |
 
 The memory budget must be below the hard cap. Each operation needs 16 MiB of
 fixed allowance, four buffers' worth of headroom, and a conservative metadata
@@ -53,10 +56,13 @@ one is required.
 | `enabled` | `true` | Disable future admission and cleanup. |
 | `required_source_mount` | `null` | Actual mount point that must contain the source and be mounted before capture. |
 | `required_destination_mount` | `null` | Actual mount point required before writing/removing archives. |
-| `backup_interval_seconds` | `21600` | Backup cadence; 1..31536000. |
+| `backup_interval_seconds` | `21600` | Backup cadence; 1..31536000. Used when `schedule` is null. |
+| `schedule` | `null` | Optional daily/weekly calendar schedule; see below. |
 | `run_on_startup` | `true` | Immediate first request for a new target. Existing schedules survive restarts. |
 | `exclude_globs` | `[]` | Case-sensitive source-relative glob patterns using `/` separators; matched directories are pruned. |
-| `symlink_policy` | `"reject"` | `reject` fails the job; `skip` records an explicit omission. Links are never followed. |
+| `symlink_policy` | `"reject"` | `reject` fails the job; `skip` records an omission; `preserve` archives the link itself. Links are never followed. |
+| `consistency` | `"live"` | `live` or `application_quiesced`; the latter requires correctly configured application hooks. |
+| `hooks` | Empty arrays | `before_backup`, `after_capture`, `after_backup`, and mandatory `finally` commands; see [hooks](hooks.md). |
 | `archive.compression` | `"deflate"` | `deflate` or `store`. |
 | `archive.compression_level` | `6` | 0..9 for deflate; ignored for store. |
 | `archive.max_archive_bytes` | `107374182400` | Maximum size of a single output ZIP, including manifest and ZIP metadata. |
@@ -99,8 +105,32 @@ contents or existing archive contents.
 
 Only one request per target can be outstanding. Due triggers while it is busy
 are skipped/logged. Restart catches up at most once per overdue target. Scheduling
-checkpoints survive reload; a changed interval takes effect at the next due
-checkpoint, which advances using the newly loaded interval.
+checkpoints survive restarts. Explicit reload reschedules a target whose interval
+or calendar schedule changed. Immediate `trigger` requests preserve these deadlines.
+
+## Calendar schedules and hooks
+
+For a weekly backup at 03:00 local time:
+
+```json
+"schedule": {
+  "frequency": "weekly",
+  "time": "03:00",
+  "timezone": "America/Los_Angeles",
+  "weekday": "mon"
+}
+```
+
+For `daily`, omit `weekday` or set it to null. Timezones use IANA names.
+Ambiguous DST times use the first occurrence; nonexistent local times are skipped.
+Interval scheduling remains available by omitting `schedule`.
+
+Each hook has a `name`, a `command` argument array beginning with an absolute
+executable path, optional `environment`, `timeout_seconds` (default 60), and
+`on_error` (default `fail_job`). Before/capture errors may use `skip_backup`,
+`retry_backup`, `fail_job`, or `continue`. After-backup errors may fail or continue;
+finally requires `fail_job`. The [hook reference](hooks.md) describes durable
+cleanup and Minecraft save acknowledgement handling.
 
 Minimum count overrides count/age/byte limits. Limits apply at sweep time and may
 temporarily be exceeded. Low free space does not authorize emergency deletion of
@@ -113,6 +143,7 @@ The optional `backends` object defaults to:
 
 ```json
 {
+  "scripts": "local_process",
   "source": "live_directory",
   "sync": "rsync",
   "archive": "infozip",
@@ -124,7 +155,7 @@ The optional `backends` object defaults to:
 }
 ```
 
-These are the compiled implementations in 0.0.1. Adding another implementation
+These are the compiled implementations in 0.0.2. Adding another implementation
 requires its documented interface and a factory registration, not changes to
 peer modules. See [module contracts](modules.md). Jobs and snapshots record their
 backend choices. Changing the state implementation requires migration/restart.
