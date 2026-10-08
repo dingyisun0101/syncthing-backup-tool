@@ -367,6 +367,12 @@ fn crash_during_write_removes_only_identified_temporary_file() {
         b"preserve",
     )
     .unwrap();
+    let tree = f.destination().join(format!(".partial/{}.tree", job.id));
+    fs::create_dir(&tree).unwrap();
+    fs::write(tree.join("ziunfinished"), b"interrupted Info-ZIP output").unwrap();
+    let unknown = f.destination().join(".partial/unknown.tree");
+    fs::create_dir(&unknown).unwrap();
+    fs::write(unknown.join("ziunknown"), b"preserve").unwrap();
     daemon::recover(&instance, &f.config).unwrap();
     assert!(
         !f.destination()
@@ -374,6 +380,8 @@ fn crash_during_write_removes_only_identified_temporary_file() {
             .exists()
     );
     assert!(f.destination().join(".partial/unknown.zip.part").exists());
+    assert!(!tree.exists());
+    assert!(unknown.join("ziunknown").exists());
     assert_eq!(instance.state.pending_count().unwrap(), 1);
 }
 

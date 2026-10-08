@@ -45,8 +45,9 @@ symlinks, modify/delete source files, or touch completed archives. Directory
 metadata and file contents are checked against the source/session contract.
 
 An archiver receives the stable private tree with `data/` and
-`meta/manifest.json`. It writes only the temporary output and honors its output
-limit. ZIP is the interoperability contract in version 1. A different ZIP backend
+`meta/manifest.json`. It writes only the temporary output and scratch files inside
+the private tree, and honors its output limit. ZIP is the interoperability contract
+in version 1. A different ZIP backend
 can replace Info-ZIP; another archive format requires an explicit format/API
 change. Canonical ZIP/manifest/SHA-256 verification in `archive` runs in addition
 to a backend's `test`, so a backend cannot bypass content verification.

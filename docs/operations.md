@@ -71,6 +71,7 @@ instance lock, and per-filesystem write locks. Each destination has
 artifacts include `<job-id>.tree/`, `<job-id>.files`, and `<job-id>.zip.part`. Do not edit these
 while the service is running. SQLite transactions use full synchronization;
 publication synchronizes files and both rename directories before catalog commit.
+Info-ZIP scratch files stay inside the journaled tree and are removed with it.
 
 After a crash, known unfinished `.part`, staging-tree, and selection-list
 artifacts are removed and the job retries from a fresh rsync capture. Unknown temporary files remain untouched. If rename succeeded

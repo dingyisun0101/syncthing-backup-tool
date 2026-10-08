@@ -214,6 +214,10 @@ impl crate::api::Archiver for InfoZip {
         command
             .current_dir(request.tree)
             .args(["-q", "-r", "-y"])
+            // Info-ZIP uses random zi* temporary names even for a new archive.
+            // Keep those inside the journaled tree so crash recovery owns them.
+            .arg("-b")
+            .arg(request.tree)
             .arg(if request.target.archive.compression == "store" {
                 "-0".to_owned()
             } else {
