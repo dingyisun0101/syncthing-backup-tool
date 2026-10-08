@@ -18,16 +18,52 @@ pub fn proc_path(file: &File) -> PathBuf {
 }
 
 pub fn open_beneath(root: &File, path: &Path, flags: OFlags) -> Result<File> {
-    Ok(File::from(
-        rustix::fs::openat2(
-            root,
-            path,
-            flags | OFlags::CLOEXEC,
-            Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
-        )
-        .with_context(|| format!("open without symlinks: {}", path.display()))?,
-    ))
+    match rustix::fs::openat2(
+        root,
+        path,
+        flags | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+    ) {
+        Ok(fd) => Ok(File::from(fd)),
+        Err(error) if error == rustix::io::Errno::NOSYS => open_components(root, path, flags),
+        Err(error) => {
+            Err(error).with_context(|| format!("open without symlinks: {}", path.display()))
+        }
+    }
+}
+
+/// openat fallback for hosts or syscall filters that do not expose openat2.
+/// Every intermediate inode is pinned and opened as a directory without links.
+pub fn open_components(root: &File, path: &Path, flags: OFlags) -> Result<File> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(name) => components.push(name),
+            std::path::Component::CurDir => (),
+            _ => anyhow::bail!("path must stay beneath its pinned root"),
+        }
+    }
+    let mut parent = root.try_clone()?;
+    for (index, name) in components.iter().enumerate() {
+        let options = if index + 1 == components.len() {
+            flags
+        } else {
+            OFlags::RDONLY | OFlags::DIRECTORY
+        };
+        parent = File::from(
+            rustix::fs::openat(
+                &parent,
+                *name,
+                options | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .with_context(|| {
+                format!("open pinned component without symlinks: {}", path.display())
+            })?,
+        );
+    }
+    Ok(parent)
 }
 
 pub fn mount_present(mount: &Path) -> Result<()> {

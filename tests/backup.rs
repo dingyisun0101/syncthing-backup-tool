@@ -710,3 +710,35 @@ fn restart_does_not_run_cleanup_for_an_active_job() {
     syncthing_backup_tool::hooks::recover(instance.state.as_ref()).unwrap();
     assert!(f.source().join("resumed").exists());
 }
+
+#[test]
+fn component_open_fallback_rejects_parent_escape_and_links() {
+    let f = Fixture::new();
+    fs::create_dir(f.source().join("directory")).unwrap();
+    fs::write(f.source().join("directory/file"), b"safe").unwrap();
+    let root = fs::File::open(f.source()).unwrap();
+    let file = syncthing_backup_tool::storage::open_components(
+        &root,
+        Path::new("directory/file"),
+        rustix::fs::OFlags::RDONLY,
+    )
+    .unwrap();
+    assert_eq!(file.metadata().unwrap().len(), 4);
+    assert!(
+        syncthing_backup_tool::storage::open_components(
+            &root,
+            Path::new("../outside"),
+            rustix::fs::OFlags::RDONLY
+        )
+        .is_err()
+    );
+    std::os::unix::fs::symlink("directory", f.source().join("alias")).unwrap();
+    assert!(
+        syncthing_backup_tool::storage::open_components(
+            &root,
+            Path::new("alias/file"),
+            rustix::fs::OFlags::RDONLY
+        )
+        .is_err()
+    );
+}
