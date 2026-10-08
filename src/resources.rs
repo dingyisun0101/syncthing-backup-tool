@@ -21,8 +21,10 @@ pub fn verify_service_limit(resources: &Resources) -> anyhow::Result<()> {
         .join(group.trim_start_matches('/'))
         .join("memory.max");
     let actual = std::fs::read_to_string(path)?;
+    let page = rustix::param::page_size() as u64;
+    let expected = resources.memory_limit_bytes / page * page;
     anyhow::ensure!(
-        actual.trim().parse::<u64>().ok() == Some(resources.memory_limit_bytes),
+        actual.trim().parse::<u64>().ok() == Some(expected),
         "systemd MemoryMax differs from memory_limit_bytes; regenerate the unit, run systemctl daemon-reload, then restart"
     );
     Ok(())
