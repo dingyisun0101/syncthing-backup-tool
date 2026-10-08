@@ -10,6 +10,7 @@ if [ "${1:-}" = configure ]; then
     fi
     install -d -o root -g syncthing-backup -m 0750 /etc/syncthing-backup-tool
     install -d -o syncthing-backup -g syncthing-backup -m 0700 /var/lib/syncthing-backup-tool
+    install -d -o syncthing-backup -g syncthing-backup -m 0700 /var/log/syncthing-backup-tool
     if [ -f /etc/syncthing-backup-tool/config.json ]; then
         chown root:syncthing-backup /etc/syncthing-backup-tool/config.json
         chmod 0640 /etc/syncthing-backup-tool/config.json

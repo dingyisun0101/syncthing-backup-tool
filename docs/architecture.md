@@ -1,6 +1,6 @@
 # Architecture
 
-Status: architecture of version 0.0.2. The implementation follows the module
+Status: architecture of version 0.0.3. The implementation follows the module
 boundaries below; later extensions and current limits are identified explicitly.
 
 ## 1. Purpose and scope

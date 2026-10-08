@@ -76,6 +76,22 @@ fn file_edits_have_no_effect_until_explicit_reload_and_invalid_reload_is_atomic(
         daemon::request(&socket, "status").unwrap()["targets"][0]["enabled"],
         true
     );
+    let original_due =
+        daemon::request(&socket, "status").unwrap()["targets"][0]["next_due_ms"].clone();
+    let unusable_log = root.join("audit-directory");
+    fs::create_dir(&unusable_log).unwrap();
+    settings["logging"] = json!({"audit_file":unusable_log});
+    settings["targets"][0]["backup_interval_seconds"] = 7200.into();
+    fs::write(
+        root.join("config.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    assert!(daemon::request(&socket, "reload").is_err());
+    let unchanged = daemon::request(&socket, "status").unwrap();
+    assert_eq!(unchanged["targets"][0]["enabled"], true);
+    assert_eq!(unchanged["targets"][0]["next_due_ms"], original_due);
+    settings.as_object_mut().unwrap().remove("logging");
     fs::write(root.join("config.json"), b"invalid JSON").unwrap();
     assert!(daemon::request(&socket, "reload").is_err());
     assert_eq!(
@@ -92,6 +108,46 @@ fn file_edits_have_no_effect_until_explicit_reload_and_invalid_reload_is_atomic(
         daemon::request(&socket, "status").unwrap()["targets"][0]["enabled"],
         false
     );
+}
+
+#[test]
+fn control_requests_can_repair_an_unwritable_audit_destination() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir(root.join("source")).unwrap();
+    let mut settings = config(root);
+    settings["logging"] = json!({"audit_file":"/dev/full"});
+    fs::write(
+        root.join("config.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    let _service = start(root);
+    let socket = root.join("control.sock");
+    assert_eq!(
+        daemon::request(&socket, "status").unwrap()["targets"][0]["enabled"],
+        true
+    );
+    let audit = root.join("operations.jsonl");
+    settings["logging"] = json!({"audit_file":audit});
+    fs::write(
+        root.join("config.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    daemon::request(&socket, "reload").unwrap();
+    assert_eq!(
+        daemon::request(&socket, "status").unwrap()["config"]["logging"]["audit_file"],
+        settings["logging"]["audit_file"]
+    );
+    assert!(
+        fs::read_to_string(root.join("service.log"))
+            .unwrap()
+            .contains("audit.write")
+    );
+    assert!(fs::read_to_string(audit).unwrap().lines()
+        .filter_map(|line|serde_json::from_str::<Value>(line).ok())
+        .any(|event|event["operation"]=="control.request" && event["outcome"]=="succeeded"));
 }
 
 #[test]
@@ -128,6 +184,22 @@ fn busy_target_skips_requests_and_shutdown_drains_cleanly() {
     });
     let status = daemon::request(&socket, "status").unwrap();
     assert_eq!(status["targets"][0]["outstanding_jobs"], 1);
+    assert!(
+        daemon::request(
+            &socket,
+            &json!({"command":"trigger","target":"test"}).to_string()
+        )
+        .is_err()
+    );
+    assert!(
+        fs::read_to_string(root.join("service.log"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|event| event["operation"] == "control.request"
+                && event["outcome"] == "failed"
+                && event["timestamp"].as_str().is_some())
+    );
     FileExt::unlock(&lock).unwrap();
     until(|| {
         daemon::request(&socket, "status").unwrap()["targets"][0]["healthy_snapshots"]

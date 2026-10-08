@@ -1,5 +1,12 @@
 # Releases and APT repository maintenance
 
+## 0.0.3
+
+Audits successful and rejected daemon control requests, prepares logging before
+changing schedules during reload, and grants the packaged default audit directory
+access before the first one-shot backup. Control/status/reload requests remain
+available with timestamped stderr fallback when the audit destination fails.
+
 ## 0.0.2
 
 Adds immediate service-side `trigger`/`job` commands, configurable script hooks,
@@ -27,7 +34,7 @@ Signing-key fingerprint: **`6872B71D4A81920AF5D4B1D04D12FAACD2545826`**.
 sudo apt-get install build-essential musl-tools python3 dpkg-dev gnupg rsync zip unzip util-linux
 rustup target add x86_64-unknown-linux-musl
 scripts/build-deb.sh
-dpkg-deb --info dist/syncthing-backup-tool_0.0.2_amd64.deb
+dpkg-deb --info dist/syncthing-backup-tool_0.0.3_amd64.deb
 ```
 
 The script builds locked dependencies, uses a static musl binary, installs
@@ -70,7 +77,7 @@ source lists or install packages:
 ```bash
 python3 scripts/verify-apt.py \
   --fingerprint 6872B71D4A81920AF5D4B1D04D12FAACD2545826 \
-  --expected-package dist/syncthing-backup-tool_0.0.2_amd64.deb
+  --expected-package dist/syncthing-backup-tool_0.0.3_amd64.deb
 ```
 
 Tag the tested source and upload the package/checksums/public key to its GitHub

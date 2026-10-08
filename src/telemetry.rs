@@ -85,7 +85,11 @@ fn private_file(path: &std::path::Path) -> Result<File> {
         .mode(0o600)
         .open(path)?)
 }
-pub fn configure(settings: &Logging) -> Result<()> {
+pub struct PreparedLogging {
+    settings: Logging,
+    sink: Option<Arc<dyn EventSink>>,
+}
+pub fn prepare(settings: &Logging) -> Result<PreparedLogging> {
     let sink = if let Some(path) = &settings.audit_file {
         if let Some(parent) = path.parent() {
             use std::os::unix::fs::DirBuilderExt;
@@ -103,19 +107,30 @@ pub fn configure(settings: &Logging) -> Result<()> {
     } else {
         None
     };
-    *SINK
+    Ok(PreparedLogging {
+        settings: settings.clone(),
+        sink,
+    })
+}
+pub fn activate(prepared: PreparedLogging) -> Result<()> {
+    let mut sink = SINK
         .get_or_init(|| RwLock::new(None))
         .write()
-        .map_err(|_| anyhow::anyhow!("audit settings poisoned"))? = sink;
-    *SETTINGS
-        .get_or_init(|| RwLock::new(settings.clone()))
+        .map_err(|_| anyhow::anyhow!("audit settings poisoned"))?;
+    let mut settings = SETTINGS
+        .get_or_init(|| RwLock::new(prepared.settings.clone()))
         .write()
-        .map_err(|_| anyhow::anyhow!("logging settings poisoned"))? = settings.clone();
+        .map_err(|_| anyhow::anyhow!("logging settings poisoned"))?;
+    *sink = prepared.sink;
+    *settings = prepared.settings;
     Ok(())
 }
-pub fn audit(operation: &str, outcome: &str, details: Value) -> Result<()> {
+pub fn configure(settings: &Logging) -> Result<()> {
+    activate(prepare(settings)?)
+}
+fn record(operation: &str, outcome: &str, details: Value) -> OperationEvent {
     let context = current_context();
-    let event = OperationEvent {
+    OperationEvent {
         timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         sequence: SEQUENCE.fetch_add(1, Ordering::Relaxed),
         job_id: context.as_ref().map(|c| c.0.clone()),
@@ -123,17 +138,36 @@ pub fn audit(operation: &str, outcome: &str, details: Value) -> Result<()> {
         operation: operation.into(),
         outcome: outcome.into(),
         details,
-    };
+    }
+}
+fn emit(event: &OperationEvent) -> Result<()> {
     if let Some(sink) = SINK
         .get()
         .and_then(|s| s.read().ok())
         .and_then(|s| s.clone())
     {
-        sink.emit(&event)?;
+        sink.emit(event)?;
     } else {
-        eprintln!("{}", serde_json::to_string(&event)?);
+        eprintln!("{}", serde_json::to_string(event)?);
     }
     Ok(())
+}
+pub fn audit(operation: &str, outcome: &str, details: Value) -> Result<()> {
+    emit(&record(operation, outcome, details))
+}
+/// Control requests must remain available to repair a failed logging destination.
+pub fn audit_or_stderr(operation: &str, outcome: &str, details: Value) {
+    let event = record(operation, outcome, details);
+    if let Err(error) = emit(&event) {
+        eprintln!(
+            "{}",
+            serde_json::to_string(&event).expect("serialize operation event")
+        );
+        eprintln!(
+            "{}",
+            serde_json::json!({"timestamp":chrono::Utc::now().to_rfc3339(),"operation":"audit.write","outcome":"failed","error":error.to_string()})
+        );
+    }
 }
 pub fn operation<T>(name: &str, details: Value, action: impl FnOnce() -> Result<T>) -> Result<T> {
     audit(name, "started", details.clone())?;

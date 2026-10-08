@@ -358,12 +358,22 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
             if let Ok((mut stream, _)) = listener.accept() {
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                telemetry::audit_or_stderr("control.request", "started", json!({}));
                 let response = control(
                     &mut stream,
                     &config_path,
                     &mut config,
                     instance.state.as_ref(),
                     workers.len() + usize::from(cleanup.is_some()),
+                );
+                telemetry::audit_or_stderr(
+                    "control.request",
+                    if response.is_ok() {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
+                    json!({"error":response.as_ref().err().map(|e|format!("{e:#}"))}),
                 );
                 let value = match response {
                     Ok(v) => json!({"ok":true,"result":v}),
@@ -480,6 +490,16 @@ fn control(
 ) -> Result<Value> {
     let mut request = String::new();
     stream.take(4096).read_to_string(&mut request)?;
+    let command = serde_json::from_str::<Value>(&request)
+        .ok()
+        .and_then(|v| v["command"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| request.trim().to_owned());
+    let command = if ["status", "reload", "trigger", "job"].contains(&command.as_str()) {
+        command.as_str()
+    } else {
+        "unknown"
+    };
+    telemetry::audit_or_stderr("control.command", "received", json!({"command":command}));
     if request.trim_start().starts_with('{') {
         let input: Value = serde_json::from_str(&request)?;
         match input["command"].as_str() {
@@ -560,6 +580,7 @@ fn control(
                 "wait for active backups to finish before changing resource limits"
             );
             validate_history(&candidate, state)?;
+            let logging = telemetry::prepare(&candidate.logging)?;
             let now = chrono::Utc::now().timestamp_millis();
             state.sync_schedules(&candidate, now)?;
             for target in &candidate.targets {
@@ -577,7 +598,7 @@ fn control(
                 }
             }
 
-            telemetry::configure(&candidate.logging)?;
+            telemetry::activate(logging)?;
             *config = candidate;
             event(
                 "info",

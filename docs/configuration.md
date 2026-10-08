@@ -1,6 +1,6 @@
 # Configuration reference
 
-Version 0.0.2 accepts `config_version: 1`. Unknown fields and invalid combinations
+Version 0.0.3 accepts `config_version: 1`. Unknown fields and invalid combinations
 are rejected. The default file is `/etc/syncthing-backup-tool/config.json`;
 `--config` chooses another path. The file is limited to 1 MiB.
 
