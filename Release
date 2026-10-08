@@ -1,0 +1,16 @@
+Origin: syncthing-backup-tool
+Label: syncthing-backup-tool
+Suite: stable
+Codename: stable
+Architectures: amd64
+Date: Thu, 08 Oct 2026 05:29:45 GMT
+Description: Signed directory snapshot packages
+MD5Sum:
+ 61820152e17d3b4f4aadea1aa7762335 754 Packages
+ 5d3143d74fde0eea03c0384a479fd013 500 Packages.gz
+SHA256:
+ 418e7caf81f98f8839fc1e5e42ca43beb0606d9b00edef24e21515ef19c3a5c9 754 Packages
+ e6092aa46952c5e742300afd9c8f8091619dc750c77fe770606e80fc08d4422a 500 Packages.gz
+SHA512:
+ bc3342f5779abd9639695d79c62368f35e901c856119b5d3edd0fe086073a7dac7683abf2c1476305f36d1fb950152ba2ff58c7e14f0c1c950be141a47258b56 754 Packages
+ ac23d210904ff4ed5cb94b36c32d7b335c2eb3b3f702bb23705c4a8e8f806022e197f646c2a1b6f4ec0dbd83f2206cd2c4dfbd8c6ab8f84a69a0eba5ceae935f 500 Packages.gz

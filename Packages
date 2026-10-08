@@ -1,0 +1,18 @@
+Package: syncthing-backup-tool
+Version: 0.0.1
+Architecture: amd64
+Maintainer: Dingyi Sun <dingyisun0101@users.noreply.github.com>
+Installed-Size: 5244
+Depends: adduser, systemd, acl, rsync, zip, unzip, util-linux
+Filename: pool/syncthing-backup-tool_0.0.1_amd64.deb
+Size: 2101722
+MD5sum: 022b16da0a830eba9266701a72367478
+SHA1: 695f026483330c9a90ae2a33e111d424fa2a9236
+SHA256: 03614eee9ce6244418e7fc68a202fe5140a8ba9db2bd766cdb9ebd1ab2ece38f
+Section: admin
+Priority: optional
+Homepage: https://github.com/dingyisun0101/syncthing-backup-tool
+Description: Scheduled verified ZIP snapshots of directories
+ Streams full directory backups into independent timestamped ZIP archives,
+ verifies their contents, and retires old snapshots using recorded policies.
+
