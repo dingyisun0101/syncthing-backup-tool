@@ -59,3 +59,13 @@ A target may specify `schedule` with `frequency` (`daily` or `weekly`), `time`
 Calendar times follow local DST. Ambiguous times use the first occurrence;
 nonexistent times are skipped. `run_on_startup` still chooses an immediate first
 request versus the next scheduled time. Manual reload reschedules changed cadence.
+
+For Minecraft servers that create owner-only files during saving, run the optional
+`minecraft-control.py serve` agent as the Minecraft file owner. Its protected
+configuration maps fixed server IDs to server/world directories; it validates
+UUID jobs and permits only prepare/resume actions over a group-restricted Unix
+socket. After a confirmed save it grants the backup account read access to newly
+created world files. The main backup daemon remains unprivileged and uses the
+agent's request mode for all hooks. Credentials stay in server.properties.
+The agent's state directory and service should be separate from the daemon's,
+with a systemd dependency ensuring it is available before backup requests.
