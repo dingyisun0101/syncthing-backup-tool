@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Modules {
+    pub scripts: Arc<dyn ScriptRunner>,
     pub source: Arc<dyn SourceProvider>,
     pub synchronizer: Arc<dyn Synchronizer>,
     pub archiver: Arc<dyn Archiver>,
@@ -15,7 +16,8 @@ pub struct Modules {
 impl Modules {
     pub fn from_choices(choices: &BackendChoices) -> Result<Self> {
         ensure!(
-            choices.source == "live_directory"
+            choices.scripts == "local_process"
+                && choices.source == "live_directory"
                 && choices.sync == "rsync"
                 && choices.archive == "infozip"
                 && choices.storage == "local"
@@ -26,6 +28,7 @@ impl Modules {
             "unsupported backend selection"
         );
         Ok(Self {
+            scripts: Arc::new(crate::hooks::LocalProcess),
             source: Arc::new(crate::source::LiveDirectory),
             synchronizer: Arc::new(crate::source::Rsync),
             archiver: Arc::new(crate::archive::InfoZip),

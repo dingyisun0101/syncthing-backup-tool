@@ -175,3 +175,40 @@ fn failed_jobs_use_bounded_retries_and_release_the_queue_slot() {
         0
     );
 }
+
+#[test]
+fn immediate_request_runs_with_service_and_keeps_the_regular_schedule() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir(root.join("source")).unwrap();
+    fs::write(root.join("source/file"), b"immediate").unwrap();
+    fs::write(
+        root.join("config.json"),
+        serde_json::to_vec(&config(root)).unwrap(),
+    )
+    .unwrap();
+    let _service = start(root);
+    let socket = root.join("control.sock");
+    let due = daemon::request(&socket, "status").unwrap()["targets"][0]["next_due_ms"].clone();
+    let output = Command::new(env!("CARGO_BIN_EXE_syncthing-backup-tool"))
+        .arg("--control-socket")
+        .arg(&socket)
+        .args([
+            "trigger",
+            "--target",
+            "test",
+            "--wait",
+            "--timeout-seconds",
+            "10",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status = daemon::request(&socket, "status").unwrap();
+    assert_eq!(status["targets"][0]["healthy_snapshots"], 1);
+    assert_eq!(status["targets"][0]["next_due_ms"], due);
+}

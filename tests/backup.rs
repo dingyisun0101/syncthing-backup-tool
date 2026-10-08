@@ -522,3 +522,191 @@ fn source_changes_during_tool_copy_fail_without_publishing() {
     assert!(result.is_err());
     assert!(f.zips().is_empty());
 }
+
+fn hook(
+    path: &Path,
+    name: &str,
+    body: &str,
+    on_error: &str,
+) -> syncthing_backup_tool::config::Hook {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    serde_json::from_value(
+        serde_json::json!({"name":name,"command":[path],"timeout_seconds":2,"on_error":on_error}),
+    )
+    .unwrap()
+}
+#[test]
+fn hooks_gate_copy_and_always_cleanup_a_failed_save() {
+    let mut f = Fixture::new();
+    let prepare = f._temp.path().join("prepare.sh");
+    let resume = f._temp.path().join("resume.sh");
+    f.config.targets[0]
+        .hooks
+        .before_backup
+        .push(hook(&prepare, "save", "exit 7", "skip_backup"));
+    f.config.targets[0].hooks.finally.push(hook(
+        &resume,
+        "resume",
+        "touch \"$BACKUP_SOURCE/resumed\"",
+        "fail_job",
+    ));
+    let instance = f.instance();
+    let job = f.job(&instance);
+    let error = syncthing_backup_tool::snapshot::create(
+        &job,
+        instance.state.as_ref(),
+        &f.config.state_dir,
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert!(error.is::<syncthing_backup_tool::domain::Skipped>());
+    assert!(f.source().join("resumed").exists());
+    assert!(f.zips().is_empty());
+    assert_eq!(
+        instance.state.job_status(&job.id).unwrap().unwrap().status,
+        "skipped"
+    );
+    assert!(!instance.state.cleanup_pending("test").unwrap());
+}
+#[test]
+fn successful_prepare_precedes_inventory_and_after_hook_error_preserves_archive() {
+    let mut f = Fixture::new();
+    let prepare = f._temp.path().join("prepare.sh");
+    let after = f._temp.path().join("after.sh");
+    f.config.targets[0].hooks.before_backup.push(hook(
+        &prepare,
+        "save",
+        "echo saved > \"$BACKUP_SOURCE/data\"",
+        "fail_job",
+    ));
+    f.config.targets[0]
+        .hooks
+        .after_backup
+        .push(hook(&after, "notify", "exit 4", "fail_job"));
+    let instance = f.instance();
+    let job = f.job(&instance);
+    assert!(
+        syncthing_backup_tool::snapshot::create(
+            &job,
+            instance.state.as_ref(),
+            &f.config.state_dir,
+            &AtomicBool::new(false)
+        )
+        .is_err()
+    );
+    assert_eq!(f.zips().len(), 1);
+    assert_eq!(
+        instance.state.job_status(&job.id).unwrap().unwrap().status,
+        "completed_with_hook_failure"
+    );
+    let mut zip = zip::ZipArchive::new(fs::File::open(&f.zips()[0]).unwrap()).unwrap();
+    let mut data = String::new();
+    zip.by_name("data/data")
+        .unwrap()
+        .read_to_string(&mut data)
+        .unwrap();
+    assert_eq!(data, "saved\n");
+}
+#[test]
+fn failed_cleanup_is_durable_blocks_target_and_can_be_recovered() {
+    let mut f = Fixture::new();
+    let prepare = f._temp.path().join("prepare.sh");
+    let resume = f._temp.path().join("resume.sh");
+    f.config.targets[0]
+        .hooks
+        .before_backup
+        .push(hook(&prepare, "save", "exit 1", "skip_backup"));
+    f.config.targets[0]
+        .hooks
+        .finally
+        .push(hook(&resume, "resume", "exit 1", "fail_job"));
+    let instance = f.instance();
+    let job = f.job(&instance);
+    assert!(
+        syncthing_backup_tool::snapshot::create(
+            &job,
+            instance.state.as_ref(),
+            &f.config.state_dir,
+            &AtomicBool::new(false)
+        )
+        .is_err()
+    );
+    assert!(instance.state.cleanup_pending("test").unwrap());
+    assert_eq!(
+        instance.state.job_status(&job.id).unwrap().unwrap().status,
+        "cleanup_failed"
+    );
+    fs::write(&resume, "#!/bin/sh\nexit 0\n").unwrap();
+    syncthing_backup_tool::hooks::recover(instance.state.as_ref()).unwrap();
+    assert!(!instance.state.cleanup_pending("test").unwrap());
+}
+#[test]
+fn hook_timeout_skips_backup_without_leaking_a_running_process() {
+    let mut f = Fixture::new();
+    let prepare = f._temp.path().join("prepare.sh");
+    let mut h = hook(&prepare, "save", "sleep 30", "skip_backup");
+    h.timeout_seconds = 1;
+    f.config.targets[0].hooks.before_backup.push(h);
+    let instance = f.instance();
+    let job = f.job(&instance);
+    let start = std::time::Instant::now();
+    assert!(
+        syncthing_backup_tool::snapshot::create(
+            &job,
+            instance.state.as_ref(),
+            &f.config.state_dir,
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .is::<syncthing_backup_tool::domain::Skipped>()
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert!(f.zips().is_empty());
+}
+#[test]
+fn preserve_symlinks_without_reading_their_targets() {
+    let mut f = Fixture::new();
+    f.config.targets[0].symlink_policy = "preserve".into();
+    std::os::unix::fs::symlink("/a/missing/external/file", f.source().join("link")).unwrap();
+    let instance = f.instance();
+    let snapshot = f.backup(&instance);
+    let manifest = archive::verify(
+        fs::File::open(f.destination().join(snapshot.filename)).unwrap(),
+        &f.config.resources,
+        None,
+        None,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let link = manifest.entries.iter().find(|e| e.path == "link").unwrap();
+    assert_eq!(link.kind, "symlink");
+    assert_eq!(
+        link.symlink_target.as_deref(),
+        Some("/a/missing/external/file")
+    );
+}
+#[test]
+fn restart_does_not_run_cleanup_for_an_active_job() {
+    let mut f = Fixture::new();
+    let resume = f._temp.path().join("resume.sh");
+    f.config.targets[0].hooks.finally.push(hook(
+        &resume,
+        "resume",
+        "touch \"$BACKUP_SOURCE/resumed\"",
+        "fail_job",
+    ));
+    let instance = f.instance();
+    let job = f.job(&instance);
+    instance.state.register_cleanup(&job).unwrap();
+    syncthing_backup_tool::hooks::recover_except(
+        instance.state.as_ref(),
+        &std::collections::HashSet::from([job.id.clone()]),
+    )
+    .unwrap();
+    assert!(!f.source().join("resumed").exists());
+    assert!(instance.state.cleanup_pending("test").unwrap());
+    syncthing_backup_tool::hooks::recover(instance.state.as_ref()).unwrap();
+    assert!(f.source().join("resumed").exists());
+}

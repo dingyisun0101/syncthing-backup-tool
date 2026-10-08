@@ -11,7 +11,7 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-pub const INTERFACE_VERSION: u32 = 1;
+pub const INTERFACE_VERSION: u32 = 2;
 pub type Monitor<'a> = &'a dyn Fn() -> Result<()>;
 
 pub struct CopyRequest<'a> {
@@ -37,6 +37,7 @@ pub trait SourceSession: Send {
         resources: &Resources,
     ) -> Result<Vec<crate::domain::Entry>>;
     fn fingerprint(&self, path: &Path, directory: bool) -> Result<crate::domain::Fingerprint>;
+    fn symlink(&self, path: &Path) -> Result<(crate::domain::Fingerprint, String)>;
 }
 pub trait SourceProvider: Send + Sync {
     fn open(&self, target: &Target) -> Result<Box<dyn SourceSession>>;
@@ -88,6 +89,14 @@ pub trait StorageProvider: Send + Sync {
 }
 
 pub trait SchedulingPolicy: Send + Sync {
+    fn next_for(&self, target: &Target, previous: i64, now: i64) -> Result<i64> {
+        if let Some(schedule) = &target.schedule {
+            crate::scheduler::calendar_next(schedule, now)
+        } else {
+            Ok(self.next_due(previous, now, target.backup_interval_seconds))
+        }
+    }
+
     fn next_due(&self, previous: i64, now: i64, interval_seconds: u64) -> i64;
 }
 pub trait QueuePolicy: Send + Sync {
@@ -105,6 +114,20 @@ pub trait RetentionPolicy: Send + Sync {
 }
 
 pub trait StateStore: Send + Sync {
+    fn register_cleanup(&self, job: &Job) -> Result<()>;
+    fn clear_cleanup(&self, id: &str) -> Result<()>;
+    fn pending_cleanups(&self) -> Result<Vec<Job>>;
+    fn cleanup_pending(&self, target: &str) -> Result<bool>;
+    fn finish_job(
+        &self,
+        job: &Job,
+        status: &str,
+        error: Option<&str>,
+        snapshot: Option<&Snapshot>,
+    ) -> Result<()>;
+    fn job_status(&self, id: &str) -> Result<Option<crate::domain::JobStatus>>;
+    fn progress(&self, id: &str, phase: &str) -> Result<()>;
+
     fn sync_schedules(&self, config: &Config, now: i64) -> Result<()>;
     fn due(&self, target: &str) -> Result<i64>;
     fn advance(&self, target: &str, due: i64) -> Result<()>;
@@ -132,4 +155,17 @@ pub trait StateStore: Send + Sync {
 /// cancellation, and reservation lifetimes, while backends own their internals.
 pub fn tool_memory(resources: &Resources) -> u64 {
     resources.memory_budget_bytes / resources.max_concurrent_snapshots as u64
+}
+
+pub struct HookRequest<'a> {
+    pub hook: &'a crate::config::Hook,
+    pub job: &'a Job,
+    pub phase: &'a str,
+    pub cancel: &'a AtomicBool,
+}
+pub trait ScriptRunner: Send + Sync {
+    fn run(&self, request: HookRequest<'_>) -> Result<crate::domain::HookResult>;
+}
+pub trait EventSink: Send + Sync {
+    fn emit(&self, event: &crate::domain::OperationEvent) -> Result<()>;
 }

@@ -1,6 +1,7 @@
 {
   "config_version": 1,
   "backends": {
+    "scripts": "local_process",
     "source": "live_directory",
     "sync": "rsync",
     "archive": "infozip",
@@ -26,7 +27,7 @@
     "io_buffer_bytes": 1048576
   },
   "retention": { "sweep_interval_seconds": 3600 },
-  "logging": { "level": "info", "format": "json" },
+  "logging": { "level": "info", "format": "json", "audit_file": "/var/log/syncthing-backup-tool/operations.jsonl", "max_file_bytes": 104857600, "max_files": 10 },
   "targets": [
     {
       "id": "photos",

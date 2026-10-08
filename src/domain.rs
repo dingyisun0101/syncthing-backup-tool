@@ -19,7 +19,7 @@ pub struct JobSpec {
     pub resources: Resources,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
     pub spec: JobSpec,
@@ -44,6 +44,8 @@ pub struct Entry {
     pub kind: String,
     pub metadata: Fingerprint,
     pub sha256: Option<String>,
+    #[serde(default)]
+    pub symlink_target: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,4 +81,49 @@ impl JobSpec {
             &self.backends,
         ))?)))
     }
+}
+
+#[derive(Debug)]
+pub struct Skipped(pub String);
+impl fmt::Display for Skipped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for Skipped {}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HookResult {
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JobStatus {
+    pub id: String,
+    pub target_id: String,
+    pub status: String,
+    pub phase: String,
+    pub attempts: u32,
+    pub error: Option<String>,
+    pub snapshot: Option<Snapshot>,
+}
+impl JobStatus {
+    pub fn terminal(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "succeeded" | "failed" | "skipped" | "cleanup_failed" | "completed_with_hook_failure"
+        )
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperationEvent {
+    pub timestamp: String,
+    pub sequence: u64,
+    pub job_id: Option<String>,
+    pub target_id: Option<String>,
+    pub operation: String,
+    pub outcome: String,
+    pub details: serde_json::Value,
 }

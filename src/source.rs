@@ -1,3 +1,4 @@
+use crate::telemetry;
 use crate::{
     config::Target,
     domain::{Fingerprint, Permanent},
@@ -6,6 +7,7 @@ use crate::{
 use crate::{domain::Entry, resources::MemoryBudget};
 use anyhow::{Result, ensure};
 use rustix::fs::OFlags;
+use serde_json::json;
 use std::{
     fs::{self, File, Metadata},
     os::unix::fs::MetadataExt,
@@ -122,10 +124,14 @@ pub fn inventory(
         };
         let kind = if metadata.is_symlink() {
             ensure!(
-                target.symlink_policy == "skip",
+                target.symlink_policy != "reject",
                 Permanent(format!("symlink rejected: {path}"))
             );
-            "skipped_symlink"
+            if target.symlink_policy == "preserve" {
+                "symlink"
+            } else {
+                "skipped_symlink"
+            }
         } else if metadata.is_dir() {
             "directory"
         } else if metadata.is_file() {
@@ -142,18 +148,34 @@ pub fn inventory(
             total <= target.storage.max_staging_bytes,
             Permanent("max_staging_bytes exceeded".into())
         );
-        if kind != "skipped_symlink" && item.depth() != 0 {
+        if !matches!(kind, "skipped_symlink" | "symlink") && item.depth() != 0 {
             let opened = source.open_entry(relative, kind == "directory")?;
             ensure!(
                 fingerprint(&opened.metadata()?) == fingerprint(&metadata),
                 "source entry changed during inspection: {path}"
             );
         }
+        let symlink_target = if kind == "symlink" {
+            Some(
+                fs::read_link(item.path())?
+                    .to_str()
+                    .ok_or_else(|| Permanent("non-UTF-8 symlink target".into()))?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        telemetry::audit(
+            "source.entry",
+            "selected",
+            json!({"path":path,"kind":kind,"bytes":metadata.len()}),
+        )?;
         entries.push(Entry {
             path,
             kind: kind.into(),
             metadata: fingerprint(&metadata),
             sha256: None,
+            symlink_target,
         });
     }
     Ok(entries)
@@ -187,6 +209,25 @@ impl crate::api::SourceSession for Source {
         resources: &crate::config::Resources,
     ) -> Result<Vec<Entry>> {
         inventory(self, target, resources)
+    }
+    fn symlink(&self, path: &Path) -> Result<(Fingerprint, String)> {
+        let parent = path.parent().unwrap_or(Path::new(""));
+        let directory = if parent.as_os_str().is_empty() {
+            self.root.try_clone()?
+        } else {
+            self.open_entry(parent, true)?
+        };
+        let leaf = proc_path(&directory).join(
+            path.file_name()
+                .ok_or_else(|| anyhow::anyhow!("missing symlink filename"))?,
+        );
+        let metadata = fs::symlink_metadata(&leaf)?;
+        ensure!(metadata.is_symlink(), "source symlink changed type");
+        let target = fs::read_link(&leaf)?
+            .to_str()
+            .ok_or_else(|| Permanent("non-UTF-8 symlink target".into()))?
+            .to_owned();
+        Ok((fingerprint(&metadata), target))
     }
     fn fingerprint(&self, path: &Path, directory: bool) -> Result<Fingerprint> {
         let file = if path.as_os_str().is_empty() {

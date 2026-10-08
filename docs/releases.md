@@ -1,5 +1,13 @@
 # Releases and APT repository maintenance
 
+## 0.0.2
+
+Adds immediate service-side `trigger`/`job` commands, configurable script hooks,
+durable mandatory cleanup and job outcomes, rotating operation audit logs,
+calendar schedules with timezone/DST handling, and symlink preservation. The
+packaged Minecraft helper validates save acknowledgements and repairs save windows.
+SQLite schema version 2 migrates version 1 while preserving archives and policies.
+
 ## 0.0.1
 
 The initial release includes the foreground daemon, explicit configuration

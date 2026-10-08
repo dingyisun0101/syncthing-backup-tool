@@ -6,6 +6,7 @@ pub mod backends;
 pub mod config;
 pub mod daemon;
 pub mod domain;
+pub mod hooks;
 pub mod process;
 pub mod queue;
 pub mod resources;

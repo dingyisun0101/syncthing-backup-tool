@@ -36,6 +36,7 @@ fn grace() -> u64 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BackendChoices {
+    pub scripts: String,
     pub source: String,
     pub sync: String,
     pub archive: String,
@@ -48,6 +49,7 @@ pub struct BackendChoices {
 impl Default for BackendChoices {
     fn default() -> Self {
         Self {
+            scripts: "local_process".into(),
             source: "live_directory".into(),
             sync: "rsync".into(),
             archive: "infozip".into(),
@@ -116,12 +118,18 @@ impl Default for SweepConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Logging {
+    pub audit_file: Option<PathBuf>,
+    pub max_file_bytes: u64,
+    pub max_files: usize,
     pub level: String,
     pub format: String,
 }
 impl Default for Logging {
     fn default() -> Self {
         Self {
+            audit_file: None,
+            max_file_bytes: 100 * 1024 * 1024,
+            max_files: 10,
             level: "info".into(),
             format: "json".into(),
         }
@@ -154,6 +162,15 @@ pub struct Target {
     pub storage: StorageConfig,
     #[serde(default)]
     pub retention: RetentionConfig,
+    #[serde(default)]
+    pub hooks: Hooks,
+    #[serde(default)]
+    pub schedule: Option<CalendarSchedule>,
+    #[serde(default = "live")]
+    pub consistency: String,
+}
+fn live() -> String {
+    "live".into()
 }
 fn yes() -> bool {
     true
@@ -163,6 +180,42 @@ fn interval() -> u64 {
 }
 fn reject() -> String {
     "reject".into()
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Hooks {
+    pub before_backup: Vec<Hook>,
+    pub after_capture: Vec<Hook>,
+    pub after_backup: Vec<Hook>,
+    pub finally: Vec<Hook>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hook {
+    pub name: String,
+    pub command: Vec<String>,
+    #[serde(default = "hook_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default = "hook_fail")]
+    pub on_error: String,
+    #[serde(default)]
+    pub environment: std::collections::BTreeMap<String, String>,
+}
+fn hook_timeout() -> u64 {
+    60
+}
+fn hook_fail() -> String {
+    "fail_job".into()
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalendarSchedule {
+    pub frequency: String,
+    pub time: String,
+    pub timezone: String,
+    #[serde(default)]
+    pub weekday: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -311,6 +364,14 @@ impl Config {
             ["json", "text"].contains(&self.logging.format.as_str()),
             "invalid logging.format"
         );
+        ensure!(
+            self.logging.max_file_bytes >= 1024 * 1024
+                && (1..=100).contains(&self.logging.max_files),
+            "invalid log rotation limits"
+        );
+        if let Some(path) = &self.logging.audit_file {
+            resolved(path)?;
+        }
         let mut ids = HashSet::new();
         for t in &self.targets {
             ensure!(
@@ -344,7 +405,7 @@ impl Config {
                 }
             }
             ensure!(
-                ["reject", "skip"].contains(&t.symlink_policy.as_str()),
+                ["reject", "skip", "preserve"].contains(&t.symlink_policy.as_str()),
                 "invalid symlink policy for {}",
                 t.id
             );
@@ -379,6 +440,53 @@ impl Config {
                 "optional retention limits must be positive or null"
             );
             t.exclusions()?;
+            ensure!(
+                ["live", "application_quiesced"].contains(&t.consistency.as_str()),
+                "invalid consistency mode"
+            );
+            if let Some(schedule) = &t.schedule {
+                crate::scheduler::calendar_next(schedule, chrono::Utc::now().timestamp_millis())?;
+            }
+            for (phase, hooks) in [
+                ("before_backup", &t.hooks.before_backup),
+                ("after_capture", &t.hooks.after_capture),
+                ("after_backup", &t.hooks.after_backup),
+                ("finally", &t.hooks.finally),
+            ] {
+                for hook in hooks {
+                    ensure!(
+                        !hook.name.is_empty()
+                            && !hook.command.is_empty()
+                            && Path::new(&hook.command[0]).is_absolute(),
+                        "hook needs a name and absolute executable path"
+                    );
+                    ensure!(
+                        (1..=3600).contains(&hook.timeout_seconds),
+                        "hook timeout must be 1..3600"
+                    );
+                    ensure!(
+                        ["skip_backup", "retry_backup", "fail_job", "continue"]
+                            .contains(&hook.on_error.as_str()),
+                        "invalid hook on_error"
+                    );
+                    ensure!(
+                        phase != "after_backup"
+                            || ["fail_job", "continue"].contains(&hook.on_error.as_str()),
+                        "after_backup cannot skip or recapture an already published archive"
+                    );
+                    ensure!(
+                        phase != "finally" || hook.on_error == "fail_job",
+                        "finally hooks are mandatory and require on_error=fail_job"
+                    );
+                }
+            }
+            if let Some(path) = &self.logging.audit_file {
+                ensure!(
+                    !overlap(path, &t.source_dir)? && !overlap(path, &t.destination_dir)?,
+                    "audit path overlaps target data"
+                );
+            }
+
             ensure!(
                 !overlap(&self.state_dir, &t.source_dir)?
                     && !overlap(&self.state_dir, &t.destination_dir)?,

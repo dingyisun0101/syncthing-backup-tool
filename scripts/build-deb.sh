@@ -9,11 +9,15 @@ cargo build --release --locked --target "$backup_target"
 package_root=$(mktemp -d)
 trap 'rm -rf "$package_root"' EXIT HUP INT TERM
 mkdir -p "$package_root/DEBIAN" "$package_root/usr/bin" "$package_root/lib/systemd/system" \
-    "$package_root/etc/syncthing-backup-tool" "$package_root/usr/share/doc/syncthing-backup-tool"
+    "$package_root/etc/syncthing-backup-tool" "$package_root/usr/share/doc/syncthing-backup-tool/docs" \
+    "$package_root/usr/share/doc/syncthing-backup-tool/packaging" "$package_root/usr/lib/syncthing-backup-tool"
 install -m 0755 "target/$backup_target/release/syncthing-backup-tool" "$package_root/usr/bin/"
 install -m 0644 packaging/syncthing-backup-tool.service "$package_root/lib/systemd/system/"
 install -m 0640 packaging/config.json "$package_root/etc/syncthing-backup-tool/"
-install -m 0644 README.md LICENSE packaging/config.example.json docs/*.md "$package_root/usr/share/doc/syncthing-backup-tool/"
+install -m 0644 README.md LICENSE packaging/config.example.json "$package_root/usr/share/doc/syncthing-backup-tool/"
+install -m 0644 docs/*.md "$package_root/usr/share/doc/syncthing-backup-tool/docs/"
+install -m 0644 packaging/config.example.json "$package_root/usr/share/doc/syncthing-backup-tool/packaging/"
+install -m 0755 scripts/minecraft-hook.py "$package_root/usr/lib/syncthing-backup-tool/"
 install -m 0755 packaging/postinst packaging/prerm packaging/postrm "$package_root/DEBIAN/"
 printf '/etc/syncthing-backup-tool/config.json\n' > "$package_root/DEBIAN/conffiles"
 installed_size=$(du -sk "$package_root/usr" "$package_root/lib" | awk '{s+=$1} END {print s}')
@@ -24,7 +28,7 @@ Section: admin
 Priority: optional
 Architecture: $deb_arch
 Maintainer: Dingyi Sun <dingyisun0101@users.noreply.github.com>
-Depends: adduser, systemd, acl, rsync, zip, unzip, util-linux
+Depends: adduser, systemd, acl, rsync, zip, unzip, util-linux, python3
 Installed-Size: $installed_size
 Homepage: https://github.com/dingyisun0101/syncthing-backup-tool
 Description: Scheduled verified ZIP snapshots of directories

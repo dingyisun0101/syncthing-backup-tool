@@ -85,8 +85,12 @@ pub fn validate_history(config: &Config, state: &dyn StateStore) -> Result<()> {
 }
 
 pub fn recover(instance: &Instance, config: &Config) -> Result<()> {
+    crate::hooks::recover(instance.state.as_ref())?;
     for job in instance.state.jobs(None)? {
         if job.attempts == 0 || !instance.state.is_interrupted(&job.id)? {
+            continue;
+        }
+        if instance.state.cleanup_pending(&job.spec.target.id)? {
             continue;
         }
         match reconcile(instance.state.as_ref(), &job, &config.state_dir) {
@@ -142,6 +146,23 @@ fn reconcile(state: &dyn StateStore, job: &Job, state_dir: &Path) -> Result<bool
         )?;
         destination.synchronize()?;
         state.complete(&snapshot)?;
+        let _context = telemetry::context(job);
+        match crate::hooks::run_phase(
+            job,
+            &modules,
+            "after_backup",
+            &job.spec.target.hooks.after_backup,
+            &AtomicBool::new(false),
+        ) {
+            Ok(()) => state.finish_job(job, "succeeded", None, Some(&snapshot))?,
+            Err(error) => state.finish_job(
+                job,
+                "completed_with_hook_failure",
+                Some(&format!("{error:#}")),
+                Some(&snapshot),
+            )?,
+        }
+
         event(
             "info",
             "interrupted publication recovered",
@@ -164,7 +185,7 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
     let config_path = fs::canonicalize(config_path)?;
     let mut config = config::load(&config_path)?;
     crate::resources::verify_service_limit(&config.resources)?;
-    telemetry::configure(&config.logging);
+    telemetry::configure(&config.logging)?;
     let instance = Instance::open(&config)?;
     instance
         .state
@@ -236,6 +257,18 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                     json!({"target":snapshot.target_id,"file":snapshot.filename,"bytes":snapshot.bytes}),
                 ),
                 Err(error) => {
+                    if instance
+                        .state
+                        .job_status(&id)?
+                        .is_some_and(|s| s.terminal())
+                    {
+                        event(
+                            "error",
+                            "backup attempt finished without success",
+                            json!({"job":id,"error":format!("{error:#}")}),
+                        );
+                        continue;
+                    }
                     if instance.state.intention(&id)?.is_some() {
                         match reconcile(instance.state.as_ref(), &worker.job, &config.state_dir) {
                             Ok(true) => continue,
@@ -285,8 +318,15 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
         }
         if !stopping {
             if Instant::now() >= recovery_due {
+                crate::hooks::recover_except(
+                    instance.state.as_ref(),
+                    &workers.keys().cloned().collect(),
+                )?;
                 for job in instance.state.jobs(None)? {
-                    if workers.contains_key(&job.id) || !instance.state.is_interrupted(&job.id)? {
+                    if workers.contains_key(&job.id)
+                        || instance.state.cleanup_pending(&job.spec.target.id)?
+                        || !instance.state.is_interrupted(&job.id)?
+                    {
                         continue;
                     }
                     match reconcile(instance.state.as_ref(), &job, &config.state_dir) {
@@ -337,7 +377,7 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
             let count = config.targets.len();
             for offset in 0..count {
                 let target = &config.targets[(rotation + offset) % count];
-                if !target.enabled {
+                if !target.enabled || instance.state.cleanup_pending(&target.id)? {
                     continue;
                 }
                 let due = instance.state.due(&target.id)?;
@@ -362,12 +402,9 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                     };
                     instance.state.enqueue(&spec, now)?;
                 }
-                instance.state.advance(
-                    &target.id,
-                    modules
-                        .scheduler
-                        .next_due(due, now, target.backup_interval_seconds),
-                )?;
+                instance
+                    .state
+                    .advance(&target.id, modules.scheduler.next_for(target, due, now)?)?;
             }
             if count > 0 {
                 rotation = (rotation + 1) % count;
@@ -391,6 +428,9 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
             for mut job in instance.state.jobs(Some(now))? {
                 if workers.len() + usize::from(cleanup.is_some()) >= slots {
                     break;
+                }
+                if instance.state.cleanup_pending(&job.spec.target.id)? {
+                    continue;
                 }
                 if !config
                     .targets
@@ -439,7 +479,66 @@ fn control(
     running: usize,
 ) -> Result<Value> {
     let mut request = String::new();
-    stream.take(128).read_to_string(&mut request)?;
+    stream.take(4096).read_to_string(&mut request)?;
+    if request.trim_start().starts_with('{') {
+        let input: Value = serde_json::from_str(&request)?;
+        match input["command"].as_str() {
+            Some("trigger") => {
+                let selected = input["target"].as_str();
+                let targets: Vec<_> = config
+                    .targets
+                    .iter()
+                    .filter(|t| t.enabled && selected.is_none_or(|id| id == t.id))
+                    .collect();
+                ensure!(!targets.is_empty(), "unknown or disabled target");
+                let mut jobs = Vec::new();
+                for target in targets {
+                    ensure!(
+                        !state.cleanup_pending(&target.id)?,
+                        "target {} has pending mandatory cleanup",
+                        target.id
+                    );
+                    ensure!(
+                        !state.outstanding(&target.id)?,
+                        "target {} already has an outstanding backup",
+                        target.id
+                    );
+                }
+                ensure!(
+                    state.pending_count()? + targets_count(config, selected)
+                        <= config.queue.max_pending_jobs,
+                    "backup queue is full"
+                );
+                for target in config
+                    .targets
+                    .iter()
+                    .filter(|t| t.enabled && selected.is_none_or(|id| id == t.id))
+                {
+                    let spec = JobSpec {
+                        backends: config.backends.clone(),
+                        target: target.clone(),
+                        resources: config.resources.clone(),
+                    };
+                    let id = state.enqueue(&spec, chrono::Utc::now().timestamp_millis())?;
+                    telemetry::audit(
+                        "queue.enqueue",
+                        "requested",
+                        json!({"target":target.id,"job":id,"origin":"immediate_command"}),
+                    )?;
+                    jobs.push(json!({"id":id,"target":target.id}));
+                }
+                return Ok(json!({"jobs":jobs}));
+            }
+            Some("job") => {
+                let id = input["id"].as_str().context("missing job ID")?;
+                return Ok(serde_json::to_value(
+                    state.job_status(id)?.context("unknown job ID")?,
+                )?);
+            }
+            _ => anyhow::bail!("unknown control command"),
+        }
+    }
+
     match request.trim() {
         "status" => state.status(config),
         "reload" => {
@@ -461,8 +560,24 @@ fn control(
                 "wait for active backups to finish before changing resource limits"
             );
             validate_history(&candidate, state)?;
-            state.sync_schedules(&candidate, chrono::Utc::now().timestamp_millis())?;
-            telemetry::configure(&candidate.logging);
+            let now = chrono::Utc::now().timestamp_millis();
+            state.sync_schedules(&candidate, now)?;
+            for target in &candidate.targets {
+                if config
+                    .targets
+                    .iter()
+                    .find(|t| t.id == target.id)
+                    .is_some_and(|old| {
+                        serde_json::to_value(&old.schedule).ok()
+                            != serde_json::to_value(&target.schedule).ok()
+                            || old.backup_interval_seconds != target.backup_interval_seconds
+                    })
+                {
+                    state.advance(&target.id, crate::scheduler::next_for(target, now, now)?)?;
+                }
+            }
+
+            telemetry::configure(&candidate.logging)?;
             *config = candidate;
             event(
                 "info",
@@ -504,4 +619,12 @@ impl Drop for Instance {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self._lock);
     }
+}
+
+fn targets_count(config: &Config, target: Option<&str>) -> usize {
+    config
+        .targets
+        .iter()
+        .filter(|t| t.enabled && target.is_none_or(|id| id == t.id))
+        .count()
 }

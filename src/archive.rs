@@ -57,7 +57,8 @@ pub fn verify(
     let manifest: Manifest = serde_json::from_slice(&bytes)?;
     drop(bytes);
     ensure!(
-        manifest.format_version == 1 && manifest.consistency == "live",
+        manifest.format_version == 1
+            && ["live", "application_quiesced"].contains(&manifest.consistency.as_str()),
         "unsupported manifest format"
     );
     if let Some(id) = job {
@@ -94,7 +95,10 @@ pub fn verify(
                 format!("data/{}/", entry.path)
             }
         } else {
-            ensure!(entry.kind == "file", "unknown manifest entry type");
+            ensure!(
+                ["file", "symlink"].contains(&entry.kind.as_str()),
+                "unknown manifest entry type"
+            );
             format!("data/{}", entry.path)
         };
         let mut member = zip.by_name(&name)?;
@@ -108,6 +112,27 @@ pub fn verify(
                 member.size() == entry.metadata.size,
                 "archive file size mismatch"
             );
+            if entry.kind == "symlink" {
+                ensure!(
+                    member
+                        .unix_mode()
+                        .is_some_and(|mode| mode & 0o170000 == 0o120000),
+                    "archive symlink type mismatch"
+                );
+                let mut target = String::new();
+                member.by_ref().take(65537).read_to_string(&mut target)?;
+                ensure!(
+                    Some(&target) == entry.symlink_target.as_ref(),
+                    "archive symlink target mismatch"
+                );
+                crate::telemetry::audit(
+                    "archive.entry.verify",
+                    "succeeded",
+                    serde_json::json!({"path":entry.path,"kind":"symlink"}),
+                )?;
+                count += 1;
+                continue;
+            }
             let mut hash = Sha256::new();
             let mut size = 0;
             loop {
@@ -125,6 +150,11 @@ pub fn verify(
                 entry.path
             );
         }
+        crate::telemetry::audit(
+            "archive.entry.verify",
+            "succeeded",
+            serde_json::json!({"path":entry.path,"kind":entry.kind}),
+        )?;
         count += 1;
     }
     if let Ok(metadata) = zip.by_name("meta/") {

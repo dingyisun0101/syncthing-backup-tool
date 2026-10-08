@@ -13,6 +13,67 @@ impl crate::api::SchedulingPolicy for Interval {
     }
 }
 
+pub fn next_for(target: &crate::config::Target, previous: i64, now: i64) -> anyhow::Result<i64> {
+    if let Some(schedule) = &target.schedule {
+        calendar_next(schedule, now)
+    } else {
+        Ok(next_due(previous, now, target.backup_interval_seconds))
+    }
+}
+pub fn calendar_next(schedule: &crate::config::CalendarSchedule, now: i64) -> anyhow::Result<i64> {
+    use anyhow::{Context, ensure};
+    use chrono::{Datelike, LocalResult, TimeZone};
+    ensure!(
+        ["daily", "weekly"].contains(&schedule.frequency.as_str()),
+        "schedule.frequency must be daily or weekly"
+    );
+    let timezone: chrono_tz::Tz = schedule
+        .timezone
+        .parse()
+        .context("invalid schedule timezone")?;
+    let time = chrono::NaiveTime::parse_from_str(&schedule.time, "%H:%M")
+        .context("schedule.time must be HH:MM")?;
+    let weekday = if schedule.frequency == "weekly" {
+        Some(match schedule.weekday.as_deref() {
+            Some("mon") => 0,
+            Some("tue") => 1,
+            Some("wed") => 2,
+            Some("thu") => 3,
+            Some("fri") => 4,
+            Some("sat") => 5,
+            Some("sun") => 6,
+            _ => anyhow::bail!("weekly schedule needs weekday mon..sun"),
+        })
+    } else {
+        None
+    };
+    let date = chrono::Utc
+        .timestamp_millis_opt(now)
+        .single()
+        .context("invalid schedule timestamp")?
+        .with_timezone(&timezone)
+        .date_naive();
+    for offset in 0..15 {
+        let day = date
+            .checked_add_days(chrono::Days::new(offset))
+            .context("schedule date overflow")?;
+        if weekday.is_some_and(|w| day.weekday().num_days_from_monday() != w) {
+            continue;
+        }
+        let value = match timezone.from_local_datetime(&day.and_time(time)) {
+            LocalResult::Single(v) => Some(v),
+            LocalResult::Ambiguous(a, b) => Some(a.min(b)),
+            LocalResult::None => None,
+        };
+        if let Some(value) = value
+            && value.timestamp_millis() > now
+        {
+            return Ok(value.timestamp_millis());
+        }
+    }
+    anyhow::bail!("no future calendar deadline")
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

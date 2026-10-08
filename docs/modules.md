@@ -1,7 +1,7 @@
 # Module interfaces
 
 `src/api.rs` is the public contract between replaceable modules. Interface version
-is `INTERFACE_VERSION = 1`; persisted JSON/ZIP manifests separately carry their
+is `INTERFACE_VERSION = 2`; persisted JSON/ZIP manifests separately carry their
 format versions. Common records live in `domain`; settings live in `config`.
 Backends do not expose SQLite connections, child-process handles, or lock internals.
 
@@ -84,5 +84,7 @@ For direct library use, construct `Modules` with your own `Arc<dyn ...>`
 implementations and pass it to `snapshot::create_with`. The integration test
 `coordinator_accepts_independently_supplied_copy_and_archive_modules` replaces
 both copy and archive modules without editing the coordinator, and verifies the
-resulting committed archive. This is a Rust interface; version 0.0.1 does not
+resulting committed archive. This is a Rust interface; version 0.0.2 does not
 load arbitrary shared-library plugins at runtime.
+
+Version 2 adds `ScriptRunner`, `HookRequest`/`HookResult`, `EventSink`/`OperationEvent`, source symlink inspection, durable cleanup/job status, and target-aware scheduling. Existing ZIP manifests remain readable.

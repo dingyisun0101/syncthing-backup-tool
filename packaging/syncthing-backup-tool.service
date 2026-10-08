@@ -13,6 +13,8 @@ ExecStart=/usr/bin/syncthing-backup-tool --config /etc/syncthing-backup-tool/con
 ExecReload=/usr/bin/syncthing-backup-tool reload
 StateDirectory=syncthing-backup-tool
 StateDirectoryMode=0700
+LogsDirectory=syncthing-backup-tool
+LogsDirectoryMode=0700
 RuntimeDirectory=syncthing-backup-tool
 RuntimeDirectoryMode=0700
 UMask=0077
@@ -26,7 +28,9 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
 
 [Install]
 WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 # syncthing-backup-tool
 
-Version **0.0.1**. A Linux service that creates full, timestamped ZIP snapshots
+Version **0.0.2**. A Linux service that creates full, timestamped ZIP snapshots
 of directories and removes older snapshots on an independent retention schedule.
 It works with any readable directory; Syncthing is a common pairing, not a dependency.
 
@@ -12,7 +12,7 @@ Requests for a busy target are skipped rather than building an unlimited backlog
 ## Install with APT
 
 The signed APT repository is hosted directly in this GitHub repository's `apt`
-branch. Release 0.0.1 provides an **amd64** package for Debian/Ubuntu systems
+branch. Release 0.0.2 provides an **amd64** package for Debian/Ubuntu systems
 with Linux **5.6 or newer**, systemd with cgroup v2, and `/proc`. The binary is statically linked
 with musl; Rust is not needed on the server.
 
@@ -37,8 +37,8 @@ APT checks signed repository metadata and package checksums; this setup uses
 `signed-by`, without disabling authentication. See [APT's authentication documentation](https://manpages.debian.org/bookworm/apt/apt-secure.8.en.html).
 
 Alternatively, download the `.deb` from the
-[v0.0.1 release](https://github.com/dingyisun0101/syncthing-backup-tool/releases/tag/v0.0.1)
-and install it with `sudo apt-get install ./syncthing-backup-tool_0.0.1_amd64.deb`.
+[v0.0.2 release](https://github.com/dingyisun0101/syncthing-backup-tool/releases/tag/v0.0.2)
+and install it with `sudo apt-get install ./syncthing-backup-tool_0.0.2_amd64.deb`.
 
 Installation creates the `syncthing-backup` service account, installs an empty
 configuration, and leaves the service stopped. Package upgrades preserve the
@@ -198,7 +198,8 @@ crash it reconciles publication intentions and retries unfinished writes.
 Sources are read live over an interval. Detected changes/unreadable files fail the
 attempt, but this does not provide an atomic or application-consistent filesystem
 snapshot. Filesystem snapshot integration is a later extension. Symlinks default
-to rejection; `skip` explicitly omits them and records that choice. Special files
+to rejection; `preserve` stores links without following their targets, and `skip`
+records explicit omissions. Special files
 and unsupported filenames are rejected. ZIPs preserve basic Unix permission bits
 and modification times; the manifest carries precise metadata. ACLs, xattrs,
 ownership restoration, sparse layout, and hard-link relationships are not preserved.
@@ -233,3 +234,29 @@ See [architecture](docs/architecture.md), [configuration](docs/configuration.md)
 [module interfaces](docs/modules.md), and [release maintenance](docs/releases.md)
 for module boundaries, backend replacement, packaging,
 and the signed APT publication procedure. Licensed under [MIT](LICENSE).
+
+## Immediate backups, hooks, and audit logs
+
+The running service can accept an immediate request without stopping:
+
+```bash
+sudo syncthing-backup-tool trigger --target photos --wait
+sudo syncthing-backup-tool trigger --wait
+sudo syncthing-backup-tool job JOB_ID
+```
+
+`--wait` returns success only when the job succeeds, including required hooks.
+It returns nonzero for skipped/failed jobs. A busy target rejects another request.
+`--timeout-seconds N` limits client waiting; the backup continues in the service.
+Immediate requests use loaded configuration and do not move scheduled deadlines.
+
+Hooks run in the `before_backup`, `after_capture`, `after_backup`, and `finally`
+phases. Before-hook errors can skip, retry, fail, or explicitly continue. Mandatory
+cleanup obligations survive crashes and block further work on the target until
+recovered. See [hook contracts](docs/hooks.md) and the packaged Minecraft helper
+at `/usr/lib/syncthing-backup-tool/minecraft-hook.py`.
+
+Set `logging.audit_file` to `/var/log/syncthing-backup-tool/operations.jsonl` for
+persistent timestamped operation/file logs. `max_file_bytes` and `max_files`
+control rotation. Journald continues to receive summaries. Calendar schedules
+support daily/weekly local times with IANA timezones; intervals remain supported.

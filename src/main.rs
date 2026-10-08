@@ -33,6 +33,17 @@ enum Command {
         #[arg(long)]
         target: Option<String>,
     },
+    /// Request immediate backups from the running service.
+    Trigger {
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, default_value_t = 0)]
+        timeout_seconds: u64,
+    },
+    /// Inspect one queued or completed job.
+    Job { id: String },
     /// Run one retention sweep using policies recorded in existing archives.
     Retain,
     /// Print a service unit using this config's memory limit and path.
@@ -63,9 +74,63 @@ fn execute() -> Result<()> {
             );
             Ok(())
         }
+        Command::Trigger {
+            target,
+            wait,
+            timeout_seconds,
+        } => {
+            let result = daemon::request(
+                &cli.control_socket,
+                &serde_json::json!({"command":"trigger","target":target}).to_string(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            if wait {
+                let started = std::time::Instant::now();
+                for job in result["jobs"].as_array().expect("trigger returns jobs") {
+                    loop {
+                        let status = daemon::request(
+                            &cli.control_socket,
+                            &serde_json::json!({"command":"job","id":job["id"]}).to_string(),
+                        )?;
+                        let value: syncthing_backup_tool::domain::JobStatus =
+                            serde_json::from_value(status.clone())?;
+                        if value.terminal() {
+                            println!("{}", serde_json::to_string_pretty(&status)?);
+                            ensure!(
+                                value.status == "succeeded",
+                                "backup {} finished as {}: {}",
+                                value.target_id,
+                                value.status,
+                                value.error.unwrap_or_default()
+                            );
+                            break;
+                        }
+                        ensure!(
+                            timeout_seconds == 0 || started.elapsed().as_secs() < timeout_seconds,
+                            "timed out waiting; backup continues in service"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+            Ok(())
+        }
+        Command::Job { id } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&daemon::request(
+                    &cli.control_socket,
+                    &serde_json::json!({"command":"job","id":id}).to_string()
+                )?)?
+            );
+            Ok(())
+        }
         command => {
             let config = config::load(&cli.config)?;
-            telemetry::configure(&config.logging);
+            if !matches!(command, Command::Validate | Command::Unit) {
+                telemetry::configure(&config.logging)?;
+            }
+
             match command {
                 Command::Validate => {
                     println!("Configuration valid ({} targets)", config.targets.len());
@@ -93,7 +158,22 @@ fn execute() -> Result<()> {
                             )
                             .replace(
                                 "TimeoutStopSec=90",
-                                &format!("TimeoutStopSec={}", config.shutdown_grace_seconds + 30)
+                                &format!(
+                                    "TimeoutStopSec={}",
+                                    config.shutdown_grace_seconds
+                                        + config
+                                            .targets
+                                            .iter()
+                                            .map(|t| t
+                                                .hooks
+                                                .finally
+                                                .iter()
+                                                .map(|h| h.timeout_seconds)
+                                                .sum::<u64>())
+                                            .max()
+                                            .unwrap_or(0)
+                                        + 30
+                                )
                             )
                     );
                     Ok(())
@@ -144,7 +224,12 @@ fn execute() -> Result<()> {
                                 println!("{}", t.destination_dir.join(snapshot.filename).display())
                             }
                             Err(e) => {
-                                if instance.state.intention(&job.id)?.is_none() {
+                                if instance
+                                    .state
+                                    .job_status(&job.id)?
+                                    .is_none_or(|s| !s.terminal())
+                                    && instance.state.intention(&job.id)?.is_none()
+                                {
                                     instance.state.failed(&job, None, &format!("{e:#}"))?;
                                 }
                                 return Err(e);
