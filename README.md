@@ -92,6 +92,10 @@ changes can still restrict it. Verify access to a newly synced file. See
 Validate the configuration, then test one backup before enabling the service:
 
 ```bash
+# The example writes audit logs here. Create it before the first one-shot run;
+# systemd also creates it when starting the service.
+sudo install -d -o syncthing-backup -g syncthing-backup -m 0700 \
+  /var/log/syncthing-backup-tool
 sudo -u syncthing-backup syncthing-backup-tool validate
 sudo -u syncthing-backup syncthing-backup-tool backup --target photos
 sudo systemctl enable --now syncthing-backup-tool
