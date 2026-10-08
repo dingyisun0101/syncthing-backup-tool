@@ -557,7 +557,10 @@ fn reporting_redacts_credentials_and_separates_capture_from_source_checks() {
     f.config.targets[0].max_capture_age_seconds = Some(1);
     let instance = f.instance();
     let _ = f.capture(&instance);
-    instance.state.record_source_check("test", None).unwrap();
+    instance
+        .state
+        .record_source_check(&f.config.targets[0], None)
+        .unwrap();
     let report = instance.state.status(&f.config).unwrap();
     assert!(!report.to_string().contains("secret-token"));
     assert_eq!(report["schema_version"], 1);

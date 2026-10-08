@@ -119,7 +119,7 @@ pub trait StateStore: Send + Sync {
     fn set_io_activity(&self, filesystem: &str, finished_ms: i64, active: bool) -> Result<()>;
     fn record_inspection(&self, kind: &str, report: &serde_json::Value) -> Result<()>;
     fn inspections(&self, kind: &str) -> Result<Vec<serde_json::Value>>;
-    fn record_source_check(&self, target: &str, capture_ms: Option<i64>) -> Result<()>;
+    fn record_source_check(&self, target: &Target, capture_ms: Option<i64>) -> Result<()>;
     fn scheduled_time(&self, job: &str, scheduled_ms: i64) -> Result<()>;
     fn register_cleanup(&self, job: &Job) -> Result<()>;
     fn clear_cleanup(&self, id: &str) -> Result<()>;

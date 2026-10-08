@@ -103,7 +103,7 @@ pub fn create_with(
                     &job.spec.target.hooks.after_capture,
                     cancel,
                 )?;
-                state.record_source_check(&job.spec.target.id, Some(snapshot.capture_ms))?;
+                state.record_source_check(&job.spec.target, Some(snapshot.capture_ms))?;
                 unchanged = true;
                 return Ok(snapshot);
             }
@@ -225,7 +225,7 @@ pub fn create_with(
             )?;
         }
         source.check()?;
-        state.record_source_check(&job.spec.target.id, None)?;
+        state.record_source_check(&job.spec.target, None)?;
         state.progress(&job.id, "after_capture")?;
         hooks::run_phase(
             job,

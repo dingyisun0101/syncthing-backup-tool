@@ -77,10 +77,15 @@ impl State {
         }
         Ok(reports)
     }
-    pub fn record_source_check(&self, target: &str, capture_ms: Option<i64>) -> Result<()> {
+    pub fn record_source_check(&self, target: &Target, capture_ms: Option<i64>) -> Result<()> {
         self.db()?.execute(
-            "INSERT OR REPLACE INTO source_checks VALUES(?1,?2,?3)",
-            params![target, chrono::Utc::now().timestamp_millis(), capture_ms],
+            "INSERT OR REPLACE INTO source_checks VALUES(?1,?2,?3,?4)",
+            params![
+                target.id,
+                chrono::Utc::now().timestamp_millis(),
+                capture_ms,
+                serde_json::to_string(&(&target.source_dir, &target.destination_dir))?
+            ],
         )?;
         Ok(())
     }
@@ -112,7 +117,7 @@ impl State {
             CREATE TABLE IF NOT EXISTS job_progress(id TEXT PRIMARY KEY,phase TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS io_activity(filesystem TEXT PRIMARY KEY,finished_ms INTEGER NOT NULL,active INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS inspections(id TEXT PRIMARY KEY,kind TEXT NOT NULL,created_ms INTEGER NOT NULL,info TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS source_checks(target_id TEXT PRIMARY KEY,checked_ms INTEGER NOT NULL,capture_ms INTEGER);
+            CREATE TABLE IF NOT EXISTS source_checks(target_id TEXT PRIMARY KEY,checked_ms INTEGER NOT NULL,capture_ms INTEGER,source_key TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS job_timings(id TEXT PRIMARY KEY,info TEXT NOT NULL);
             COMMIT;")?;
         if version < 3 {
@@ -354,7 +359,11 @@ impl State {
         for t in &config.targets {
             let last = catalog
                 .iter()
-                .filter(|(s, h, _)| *h && s.target_id == t.id)
+                .filter(|(s, h, _)| {
+                    *h && s.target_id == t.id
+                        && s.target.source_dir == t.source_dir
+                        && s.target.destination_dir == t.destination_dir
+                })
                 .map(|(s, _, _)| s.capture_ms)
                 .max();
             let error: Option<String> = db
@@ -367,8 +376,11 @@ impl State {
                 .flatten();
             let checked: Option<i64> = db
                 .query_row(
-                    "SELECT checked_ms FROM source_checks WHERE target_id=?1",
-                    [&t.id],
+                    "SELECT checked_ms FROM source_checks WHERE target_id=?1 AND source_key=?2",
+                    params![
+                        t.id,
+                        serde_json::to_string(&(&t.source_dir, &t.destination_dir))?
+                    ],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -644,7 +656,7 @@ impl crate::api::StateStore for State {
     fn inspections(&self, kind: &str) -> Result<Vec<serde_json::Value>> {
         State::inspections(self, kind)
     }
-    fn record_source_check(&self, target: &str, capture_ms: Option<i64>) -> Result<()> {
+    fn record_source_check(&self, target: &Target, capture_ms: Option<i64>) -> Result<()> {
         State::record_source_check(self, target, capture_ms)
     }
     fn register_cleanup(&self, job: &Job) -> Result<()> {
