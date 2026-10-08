@@ -56,6 +56,15 @@ bytes. Signed `Release` hashes authenticate the indexes, whose hashes authentica
 package contents. Test `apt-get update` and downloading the pinned version from
 the published URL before declaring a release available.
 
+The verification script uses temporary APT state and does not modify the system's
+source lists or install packages:
+
+```bash
+python3 scripts/verify-apt.py \
+  --fingerprint 6872B71D4A81920AF5D4B1D04D12FAACD2545826 \
+  --expected-package dist/syncthing-backup-tool_0.0.1_amd64.deb
+```
+
 Tag the tested source and upload the package/checksums/public key to its GitHub
 release. GitHub hosts package artifacts; this release is not a crates.io upload.
 The CI workflow validates Rust and builds a Debian artifact, but does not receive
