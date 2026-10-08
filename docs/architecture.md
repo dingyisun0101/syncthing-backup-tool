@@ -1,6 +1,6 @@
 # Architecture
 
-Status: architecture of version 0.0.4. The implementation follows the module
+Status: architecture of version 0.1.0. The implementation follows the module
 boundaries below; later extensions and current limits are identified explicitly.
 
 ## 1. Purpose and scope
@@ -17,8 +17,9 @@ The initial design supports multiple targets, each with its own source,
 destination, backup interval, and retention policy. Each archive is a complete,
 independent backup of the selected files; restoring it does not require earlier
 archives. Configuration refresh is an explicit command, with no automatic file
-watching. Incremental backups, a restore command, and filesystem snapshot
-providers are later extensions.
+watching. Incremental storage and filesystem snapshot providers remain later extensions.
+Read-only planning, scrubbing, restore/rehearsal, and reviewed cohort retirement
+are available in 0.1.0; see configuration and operations for their limits.
 
 Two different queues must be distinguished:
 
@@ -261,8 +262,9 @@ than the minimum available, delete none. Failed or quarantined archives do not
 satisfy the minimum; corrupt artifacts are reported and preserved for inspection.
 Here, healthy means verified at publication with no subsequently detected damage.
 Before a cohort needs deletion, recheck its archive digests and contents, quarantine
-damaged archives, and replan against healthy survivors. Continuous checking outside
-these sweeps is a separate future feature.
+damaged archives, and replan against healthy survivors. An unresolved incident
+blocks target deletion until explicit operator review. Independent scrub schedules
+inspect copies below retention thresholds without creating snapshots.
 
 Record deletion intention before unlinking, then synchronize the directory and
 update the catalog. If a deletion fails, retain/reconcile its record and retry

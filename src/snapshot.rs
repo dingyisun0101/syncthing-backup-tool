@@ -57,6 +57,7 @@ pub fn create_with(
         state.register_cleanup(job)?;
     }
     let mut committed: Option<Snapshot> = None;
+    let mut unchanged = false;
 
     let started = Utc::now();
     let filename = format!(
@@ -70,7 +71,7 @@ pub fn create_with(
     let files_path = parent.join(format!("{}.files", job.id));
     let address_limit =
         job.spec.resources.memory_budget_bytes / job.spec.resources.max_concurrent_snapshots as u64;
-    let result = (|| {
+    let mut result = (|| {
         destination.check_space(1024 * 1024)?;
         state.progress(&job.id, "before_backup")?;
         hooks::run_phase(
@@ -85,6 +86,28 @@ pub fn create_with(
         })?;
         state.progress(&job.id, "inventory")?;
         let mut entries = source.inventory(&job.spec.target, &job.spec.resources)?;
+        if job.spec.target.skip_unchanged {
+            state.progress(&job.id, "source_hash_check")?;
+            if let Some(snapshot) = unchanged_capture(
+                job,
+                state,
+                source.as_ref(),
+                destination.as_ref(),
+                &mut entries,
+                cancel,
+            )? {
+                hooks::run_phase(
+                    job,
+                    modules,
+                    "after_capture",
+                    &job.spec.target.hooks.after_capture,
+                    cancel,
+                )?;
+                state.record_source_check(&job.spec.target.id, Some(snapshot.capture_ms))?;
+                unchanged = true;
+                return Ok(snapshot);
+            }
+        }
         let source_bytes = entries
             .iter()
             .filter(|e| e.kind == "file")
@@ -149,6 +172,7 @@ pub fn create_with(
                 })
             },
         )?;
+        state.progress(&job.id, "staging_verify")?;
         for entry in &mut entries {
             check_cancel(cancel)?;
             if entry.kind == "skipped_symlink" {
@@ -201,6 +225,7 @@ pub fn create_with(
             )?;
         }
         source.check()?;
+        state.record_source_check(&job.spec.target.id, None)?;
         state.progress(&job.id, "after_capture")?;
         hooks::run_phase(
             job,
@@ -288,6 +313,39 @@ pub fn create_with(
             )
         })?;
         File::open(&archive_path)?.sync_all()?;
+        if job.spec.target.archive.reopened_verification {
+            state.progress(&job.id, "reopened_verify")?;
+            let file = File::open(&archive_path)?;
+            let before = crate::source::fingerprint(&file.metadata()?);
+            let hints = crate::integrity::evict(&file);
+            drop(file);
+            let actual = digest(
+                File::open(&archive_path)?,
+                job.spec.resources.io_buffer_bytes,
+                cancel,
+            )?;
+            if actual != hash {
+                return Err(crate::archive::Mismatch {
+                    phase: "reopened_archive_digest".into(),
+                    path: archive_path.display().to_string(),
+                    expected: hash.clone(),
+                    actual,
+                }
+                .into());
+            }
+            verify(
+                File::open(&archive_path)?,
+                &job.spec.resources,
+                Some(&job.id),
+                Some(&job.spec.target),
+                cancel,
+            )?;
+            ensure!(
+                crate::source::fingerprint(&File::open(&archive_path)?.metadata()?) == before,
+                "archive metadata changed during reopened verification"
+            );
+            telemetry::audit("archive.reopened_verify", "succeeded", hints)?;
+        }
         source.check()?;
         destination.check_space(0)?;
         check_cancel(cancel)?;
@@ -303,6 +361,7 @@ pub fn create_with(
             capture_ms: started.timestamp_millis(),
             filename,
             bytes,
+            selected_bytes: Some(source_bytes),
             sha256: hash,
             target: job.spec.target.clone(),
         };
@@ -325,7 +384,34 @@ pub fn create_with(
         Ok(snapshot)
     })();
 
-    if result.is_err() && state.intention(&job.id)?.is_none() {
+    let failed_verification = result
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.is::<crate::archive::Mismatch>())
+        || (result.is_err()
+            && !cancel.load(std::sync::atomic::Ordering::Relaxed)
+            && state.job_status(&job.id)?.is_some_and(|s| {
+                ["verify", "content_verify", "digest", "reopened_verify"]
+                    .contains(&s.phase.as_str())
+            }));
+    if failed_verification {
+        let error = result.as_ref().expect_err("verification failed");
+        let report = serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"target":job.spec.target.id,"job_id":job.id,"phase":state.job_status(&job.id)?.map(|s|s.phase),"path":archive_path,"staging_path":tree,"error":format!("{error:#}"),"mismatch":error.downcast_ref::<crate::archive::Mismatch>().map(|m|serde_json::json!(m)),"evidence_preserved":true});
+        if let Err(e) = state.record_inspection("integrity_incident", &report) {
+            telemetry::event(
+                "error",
+                "integrity evidence persistence failed",
+                serde_json::json!({"error":format!("{e:#}")}),
+            );
+        }
+        result = result.map_err(|e| {
+            e.context(Permanent(
+                "archive verification failed; evidence preserved; automatic recapture disabled"
+                    .into(),
+            ))
+        });
+    }
+    if result.is_err() && !failed_verification && state.intention(&job.id)?.is_none() {
         if let Err(error) = destination.remove_temporary(&job.id) {
             telemetry::event(
                 "error",
@@ -356,7 +442,12 @@ pub fn create_with(
         return Err(error);
     }
     match &result {
-        Ok(snapshot) => state.finish_job(job, "succeeded", None, Some(snapshot))?,
+        Ok(snapshot) => state.finish_job(
+            job,
+            if unchanged { "unchanged" } else { "succeeded" },
+            None,
+            Some(snapshot),
+        )?,
         Err(error) if committed.is_some() => state.finish_job(
             job,
             "completed_with_hook_failure",
@@ -384,4 +475,124 @@ pub fn create_with(
         serde_json::json!({"error":result.as_ref().err().map(|e|format!("{e:#}"))}),
     )?;
     result
+}
+
+fn unchanged_capture(
+    job: &Job,
+    state: &dyn StateStore,
+    source: &dyn crate::api::SourceSession,
+    destination: &dyn crate::api::DestinationSession,
+    entries: &mut [crate::domain::Entry],
+    cancel: &AtomicBool,
+) -> Result<Option<Snapshot>> {
+    let policy = job.spec.policy_id()?;
+    let catalog = state.catalog()?;
+    let mut snapshots = catalog
+        .iter()
+        .filter(|(s, h, _)| *h && s.policy_id == policy)
+        .map(|(s, _, _)| s)
+        .collect::<Vec<_>>();
+    snapshots.sort_by_key(|s| std::cmp::Reverse(s.capture_ms));
+    if snapshots.len() < job.spec.target.retention.min_snapshots {
+        return Ok(None);
+    }
+    let latest = snapshots[0];
+    let age = Utc::now()
+        .timestamp_millis()
+        .saturating_sub(latest.capture_ms)
+        .max(0) as u64
+        / 1000;
+    if job
+        .spec
+        .target
+        .max_capture_age_seconds
+        .is_none_or(|limit| age >= limit)
+    {
+        return Ok(None);
+    }
+    for entry in entries.iter_mut().filter(|e| e.kind == "file") {
+        let file = source.file(Path::new(&entry.path))?;
+        ensure!(
+            crate::source::fingerprint(&file.metadata()?) == entry.metadata,
+            "source changed before unchanged check: {}",
+            entry.path
+        );
+        entry.sha256 = Some(digest(
+            file.try_clone()?,
+            job.spec.resources.io_buffer_bytes,
+            cancel,
+        )?);
+        ensure!(
+            crate::source::fingerprint(&file.metadata()?) == entry.metadata,
+            "source changed during unchanged check: {}",
+            entry.path
+        );
+    }
+    let second = source.inventory(&job.spec.target, &job.spec.resources)?;
+    let second = second
+        .iter()
+        .map(|e| (&e.path, (&e.kind, &e.metadata, &e.symlink_target)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    ensure!(
+        second.len() == entries.len()
+            && entries
+                .iter()
+                .all(|e| second.get(&e.path) == Some(&(&e.kind, &e.metadata, &e.symlink_target))),
+        "source selection changed during unchanged check"
+    );
+    crate::integrity::verify_checked(
+        state,
+        destination,
+        latest,
+        &job.spec.resources,
+        false,
+        cancel,
+    )?;
+    let previous = verify(
+        destination.archive(&latest.filename)?,
+        &job.spec.resources,
+        Some(&latest.job_id),
+        Some(&latest.target),
+        cancel,
+    )?;
+    let previous = previous
+        .entries
+        .iter()
+        .map(|e| (&e.path, e))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let same = previous.len() == entries.len()
+        && entries.iter().all(|e| {
+            previous.get(&e.path).is_some_and(|p| {
+                p.kind == e.kind
+                    && p.sha256 == e.sha256
+                    && p.symlink_target == e.symlink_target
+                    && p.metadata.mode == e.metadata.mode
+                    && (e.kind != "file"
+                        || (p.metadata.size == e.metadata.size
+                            && p.metadata.mtime_seconds == e.metadata.mtime_seconds
+                            && p.metadata.mtime_nanoseconds == e.metadata.mtime_nanoseconds))
+            })
+        });
+    if !same {
+        return Ok(None);
+    }
+    for (snapshot, healthy, _) in catalog.iter().filter(|(s, _, _)| {
+        s.target_id == job.spec.target.id
+            && s.target.source_dir == job.spec.target.source_dir
+            && s.target.destination_dir == job.spec.target.destination_dir
+    }) {
+        ensure!(
+            *healthy,
+            "unchanged result blocked by unhealthy retained archive"
+        );
+        crate::integrity::verify_checked(
+            state,
+            destination,
+            snapshot,
+            &job.spec.resources,
+            false,
+            cancel,
+        )?;
+    }
+    Ok(Some(latest.clone()))
 }

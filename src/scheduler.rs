@@ -14,8 +14,21 @@ impl crate::api::SchedulingPolicy for Interval {
 }
 
 pub fn next_for(target: &crate::config::Target, previous: i64, now: i64) -> anyhow::Result<i64> {
+    if target.manual_only {
+        return Ok(i64::MAX);
+    }
     if let Some(schedule) = &target.schedule {
         calendar_next(schedule, now)
+    } else if let Some(anchor) = &target.interval_anchor {
+        let anchor = chrono::DateTime::parse_from_rfc3339(anchor)?.timestamp_millis();
+        let interval = target.backup_interval_seconds as i64 * 1000;
+        if now < anchor {
+            Ok(anchor)
+        } else {
+            Ok(anchor.saturating_add(
+                (now.saturating_sub(anchor) / interval + 1).saturating_mul(interval),
+            ))
+        }
     } else {
         Ok(next_due(previous, now, target.backup_interval_seconds))
     }
@@ -31,8 +44,27 @@ pub fn calendar_next(schedule: &crate::config::CalendarSchedule, now: i64) -> an
         .timezone
         .parse()
         .context("invalid schedule timezone")?;
-    let time = chrono::NaiveTime::parse_from_str(&schedule.time, "%H:%M")
-        .context("schedule.time must be HH:MM")?;
+    ensure!(
+        schedule.time.is_empty() != schedule.times.is_empty(),
+        "provide exactly one of schedule.time or schedule.times"
+    );
+    let slots: Vec<_> = if schedule.times.is_empty() {
+        vec![&schedule.time]
+    } else {
+        schedule.times.iter().collect()
+    };
+    ensure!(slots.len() <= 96, "at most 96 calendar slots allowed");
+    let mut times = Vec::new();
+    for slot in slots {
+        let time = chrono::NaiveTime::parse_from_str(slot, "%H:%M")
+            .context("calendar slots must be HH:MM")?;
+        ensure!(
+            time.format("%H:%M").to_string() == *slot && !times.contains(&time),
+            "invalid or duplicate calendar slot"
+        );
+        times.push(time);
+    }
+    times.sort();
     let weekday = if schedule.frequency == "weekly" {
         Some(match schedule.weekday.as_deref() {
             Some("mon") => 0,
@@ -60,15 +92,17 @@ pub fn calendar_next(schedule: &crate::config::CalendarSchedule, now: i64) -> an
         if weekday.is_some_and(|w| day.weekday().num_days_from_monday() != w) {
             continue;
         }
-        let value = match timezone.from_local_datetime(&day.and_time(time)) {
-            LocalResult::Single(v) => Some(v),
-            LocalResult::Ambiguous(a, b) => Some(a.min(b)),
-            LocalResult::None => None,
-        };
-        if let Some(value) = value
-            && value.timestamp_millis() > now
-        {
-            return Ok(value.timestamp_millis());
+        for time in &times {
+            let value = match timezone.from_local_datetime(&day.and_time(*time)) {
+                LocalResult::Single(v) => Some(v),
+                LocalResult::Ambiguous(a, b) => Some(a.min(b)),
+                LocalResult::None => None,
+            };
+            if let Some(value) = value
+                && value.timestamp_millis() > now
+            {
+                return Ok(value.timestamp_millis());
+            }
         }
     }
     anyhow::bail!("no future calendar deadline")

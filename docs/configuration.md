@@ -1,6 +1,6 @@
 # Configuration reference
 
-Version 0.0.4 accepts `config_version: 1`. Unknown fields and invalid combinations
+Version 0.1.0 accepts `config_version: 1`. Unknown fields and invalid combinations
 are rejected. The default file is `/etc/syncthing-backup-tool/config.json`;
 `--config` chooses another path. The file is limited to 1 MiB.
 
@@ -28,6 +28,12 @@ destinations or state storage. Destinations cannot overlap each other.
 | `resources.memory_budget_bytes` | `268435456` | Shared conservative job-buffer/metadata budget, divided across operation slots. |
 | `resources.memory_limit_bytes` | `536870912` | Hard service cap used by `unit` to generate `MemoryMax=`; restart/unit regeneration required to change. |
 | `resources.io_buffer_bytes` | `1048576` | Streaming buffer size. |
+| `io_cooldown_seconds` | `0` | Idle period after bulk I/O on each filesystem; 0..86400. |
+| `scrub.interval_seconds` | `null` | Independent scrub interval, 1..31536000; null disables scheduled scrubs. |
+| `scrub.reopened_read` | `false` | Synchronize, request advisory cache eviction, reopen, and verify a second time. |
+| `rehearsal.interval_seconds` | `null` | Independent restore rehearsal interval, 1..31536000; null disables it. |
+| `rehearsal.scratch_dir` | `null` | Isolated writable directory outside sources, destinations, and state; required for scheduled rehearsals. |
+| `rehearsal.sample_files` | `null` | Positive file sample limit, or null for a full rehearsal. |
 | `retention.sweep_interval_seconds` | `3600` | Independent cleanup interval; 1..31536000. |
 | `logging.level` | `"info"` | `debug`, `info`, `warn`, or `error`. |
 | `logging.format` | `"json"` | `json` or `text`, written to stderr/journald. |
@@ -53,6 +59,17 @@ one is required.
 | `id` | Required | Unique 1..64-character identifier: ASCII letters, digits, `_`, `-`. Keep it stable. |
 | `source_dir` | Required | Readable directory; never written by the service. |
 | `destination_dir` | Required | Dedicated empty directory, or one already owned by this target/state pair. |
+| `manual_only` | `false` | Disable scheduled admission while preserving manual triggers and retention. |
+| `interval_anchor` | `null` | RFC3339 instant with explicit offset for elapsed intervals; mutually exclusive with a calendar schedule. |
+| `include_paths` | `[]` | Explicit relative paths/subtrees protected from glob/cache exclusions; their ancestors remain traversable. |
+| `cache.cachedir_tags` | `false` | Discover regular tags with the exact 43-byte signature. |
+| `cache.cargo_build` | `false` | Discover target directories with a valid tag, regular sibling Cargo.toml, and regular valid .rustc_info.json containing rustc_fingerprint. |
+| `cache.approved_paths` | `[]` | Reviewed relative cache paths. A matching tag/preset remains required; newly discovered unapproved caches stay included. |
+| `skip_unchanged` | `false` | Hash selected source content and verify retained archives before avoiding a new ZIP; requires a maximum capture age. |
+| `max_capture_age_seconds` | `null` | Positive acceptable capture age; old/missing captures degrade health and force a new capture when skip_unchanged is enabled. |
+| `storage.cooldown_seconds` | `null` | Per-filesystem override for this target, 0..86400; null inherits the global value. The largest configured value on a shared filesystem applies. |
+| `archive.store_extensions` | `[]` | Dot-prefixed suffixes such as .jpg or .zip, stored without deflate while other entries use configured compression. |
+| `archive.reopened_verification` | `false` | Additional synchronized, reopened digest/content verification before publication, with advisory cache eviction. |
 | `enabled` | `true` | Disable future admission and cleanup. |
 | `required_source_mount` | `null` | Actual mount point that must contain the source and be mounted before capture. |
 | `required_destination_mount` | `null` | Actual mount point required before writing/removing archives. |
@@ -123,7 +140,24 @@ For a weekly backup at 03:00 local time:
 
 For `daily`, omit `weekday` or set it to null. Timezones use IANA names.
 Ambiguous DST times use the first occurrence; nonexistent local times are skipped.
-Interval scheduling remains available by omitting `schedule`.
+Use exactly one of `time` and `times`. For example, four local slots are:
+
+```json
+"schedule": {
+  "frequency": "daily",
+  "times": ["00:30", "06:30", "12:30", "18:30"],
+  "timezone": "America/Los_Angeles"
+}
+```
+
+Slots are unique strict HH:MM values (maximum 96), including weekly schedules.
+A fallback hour runs its first occurrence once. A missing spring slot is skipped.
+For six elapsed hours instead, omit schedule, set backup_interval_seconds to
+21600 and interval_anchor to an instant such as 2026-10-08T00:30:00-07:00.
+Anchored intervals keep their elapsed phase through DST and restarts. Busy or
+missed deadlines coalesce into at most one catch-up, and manual triggers do not
+move regular deadlines. manual_only suppresses startup captures as well.
+Interval scheduling without an anchor remains backward compatible.
 
 Each hook has a `name`, a `command` argument array beginning with an absolute
 executable path, optional `environment`, `timeout_seconds` (default 60), and
@@ -155,7 +189,7 @@ The optional `backends` object defaults to:
 }
 ```
 
-These are the compiled implementations in 0.0.2. Adding another implementation
+These are the compiled implementations in 0.1.0. Adding another implementation
 requires its documented interface and a factory registration, not changes to
 peer modules. See [module contracts](modules.md). Jobs and snapshots record their
 backend choices. Changing the state implementation requires migration/restart.
@@ -174,3 +208,29 @@ SSD. `max_staging_bytes` is checked against selected file sizes and monitored
 while rsync runs; external writers and monitoring intervals mean it is not a
 filesystem quota. The output ZIP's maximum size is enforced by an OS file-size
 limit. Failed/cancelled staging is cleaned only for journaled job identities.
+
+## Idle periods, cache review, and unchanged checks
+
+The coordinator reserves a filesystem before allocating a worker or running
+preparation hooks. Backup attempts, retention with actual candidates, scrubs,
+rehearsals, and publication recovery share these reservations. Different
+filesystems remain independent. Runtime waiting uses monotonic elapsed time;
+finished UTC timestamps survive restarts. An interrupted reservation starts a
+fresh full idle period after restart. Reporting exposes next eligible time and
+the delay reason. Mandatory save-on/finally recovery bypasses the idle period. Scheduled scrubs
+and rehearsals first run one interval after activation; their deadlines survive
+restart. One-shot inspection commands provide an immediate run with the daemon
+stopped.
+
+Plan reports cache candidates before approval. Enable discovery, inspect the
+plan, and add only reviewed relative paths to cache.approved_paths. Include
+paths protect research even beneath an approved cache. Invalid/symlinked tags
+and unproven target directories stay eligible; source files are never deleted.
+Recognition follows the [Cache Directory Tagging Specification](https://bford.info/cachedir/).
+
+Unchanged checks require the current cohort's protected minimum, a sufficiently
+recent capture, content hashes (with before/after identity checks), and a second
+selection walk. All retained copies for that source/destination must verify.
+A check does not advance last_capture_ms; it updates last_source_check_ms and
+finishes as unchanged. Missing protection or reaching maximum age creates a
+fresh archive. Integrity failures remain failures with preserved evidence.

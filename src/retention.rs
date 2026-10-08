@@ -42,6 +42,7 @@ pub fn plan(mut snapshots: Vec<Snapshot>, policy: &RetentionConfig, now: i64) ->
 
 pub fn sweep(state: &dyn StateStore, config: &Config, cancel: &AtomicBool) -> Result<()> {
     config.validate()?;
+    let incidents = crate::integrity::unresolved(state)?;
     let mut groups: BTreeMap<String, Vec<Snapshot>> = BTreeMap::new();
     for (snapshot, healthy, deleting) in state.catalog()? {
         let managed = config.targets.iter().any(|t| {
@@ -50,7 +51,11 @@ pub fn sweep(state: &dyn StateStore, config: &Config, cancel: &AtomicBool) -> Re
                 && t.source_dir == snapshot.target.source_dir
                 && t.destination_dir == snapshot.target.destination_dir
         });
-        if !managed {
+        if !managed
+            || incidents
+                .iter()
+                .any(|incident| incident["target"] == snapshot.target_id)
+        {
             continue;
         }
         let modules = Modules::from_choices(&snapshot.backends)?;
@@ -117,20 +122,25 @@ pub fn sweep(state: &dyn StateStore, config: &Config, cancel: &AtomicBool) -> Re
             }
         };
         let mut healthy = Vec::new();
+        let _filesystem_lock = destination.serialize_writes(&config.state_dir)?;
+        let mut incident = false;
         for snapshot in snapshots {
             archive::check_cancel(cancel)?;
-            match archive::verify_snapshot(
+            match crate::integrity::verify_checked(
+                state,
                 destination.as_ref(),
                 &snapshot,
                 &config.resources,
+                config.scrub.reopened_read,
                 cancel,
             ) {
-                Ok(()) => healthy.push(snapshot),
+                Ok(_) => healthy.push(snapshot),
                 Err(e) => {
                     if cancel.load(Ordering::Relaxed) {
                         return Err(e);
                     }
                     state.quarantine(&snapshot.job_id)?;
+                    incident = true;
                     event(
                         "error",
                         "snapshot quarantined; file preserved",
@@ -138,6 +148,9 @@ pub fn sweep(state: &dyn StateStore, config: &Config, cancel: &AtomicBool) -> Re
                     );
                 }
             }
+        }
+        if incident {
+            continue;
         }
         for snapshot in
             modules

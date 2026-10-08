@@ -1,7 +1,7 @@
 # Module interfaces
 
 `src/api.rs` is the public contract between replaceable modules. Interface version
-is `INTERFACE_VERSION = 2`; persisted JSON/ZIP manifests separately carry their
+is `INTERFACE_VERSION = 3`; persisted JSON/ZIP manifests separately carry their
 format versions. Common records live in `domain`; settings live in `config`.
 Backends do not expose SQLite connections, child-process handles, or lock internals.
 
@@ -92,3 +92,10 @@ resulting committed archive. This is a Rust interface; version 0.0.2 does not
 load arbitrary shared-library plugins at runtime.
 
 Version 2 adds `ScriptRunner`, `HookRequest`/`HookResult`, `EventSink`/`OperationEvent`, source symlink inspection, durable cleanup/job status, and target-aware scheduling. Existing ZIP manifests remain readable.
+
+Version 3 adds pinned source-file reads for strong unchanged checks and durable
+filesystem activity, scheduled-time metrics, source-check timestamps, and
+inspection/administrative reports through StateStore. SQLite schema 3 migrates
+schemas 1 and 2. Old archive manifests remain format 1 and are never rewritten.
+Direct library callers must reserve an io_policy::Coordinator permit before
+bulk I/O; the CLI and daemon perform this before worker/hook allocation.

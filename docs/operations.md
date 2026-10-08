@@ -16,6 +16,17 @@ Configure it, take a one-shot backup, then enable it as described in the README.
 | `retain` | Execute one cleanup sweep against recorded policies, with the daemon stopped. |
 | `reload` | Ask the running daemon to reread its original config path; failure retains loaded settings. |
 | `status` | Read loaded service state, next deadlines, outstanding counts, last error, snapshot counts/bytes, and age of last successful capture. |
+| `plan --target ID --proposed-config PATH` | Read-only selection/policy comparison and capacity forecast for every target on each disk; flags are optional. No state/log/archive initialization. |
+| `retention-plan --target ID` | Read-only cohort protection, usage, management, and candidate preview; target is optional. Candidates still require fresh verification. |
+| `scrub --target ID --reopened-read` | With daemon stopped, verify owned archives and record results/incidents; no backup or retention. Optional target/reopened read. |
+| `inspect --archive PATH` | Verify and print the manifest, with daemon stopped. Catalog digest is checked when the archive is indexed. |
+| `restore --archive PATH --destination PATH --path RELATIVE` | With daemon stopped, restore all or selected subtrees to an empty isolated destination and verify hashes. Repeat path to select more entries. |
+| `rehearse --scratch-dir PATH --target ID --full` | With daemon stopped, run an isolated rehearsal; optional flags override configuration. Successful owned scratch trees are removed; failures are preserved. |
+| `transition-plan --target ID --from-policy POLICY --rollback-window-seconds N --output PATH` | Save a private reviewed retirement plan outside protected data. Requires sufficient current-cohort captures. |
+| `transition-apply --plan PATH` | With daemon stopped, register/apply/resume exactly that plan after its rollback window, verifying replacements and candidates first. |
+| `incident-resolve --id ID --reason TEXT` | With daemon stopped, record an operator review without removing evidence or blessing corrupt archives. Fresh cleanup verification remains mandatory. |
+| `incidents` | Read persisted integrity evidence without catalog mutation. |
+| `report --check` | Stable JSON (schema_version 1) for local monitoring; nonzero when target or latest scrub/rehearsal health is degraded. |
 | `unit` | Generate a unit with config path, memory limit, and shutdown timeout. |
 
 `--config PATH` and `--control-socket PATH` are global flags. The default socket
@@ -59,8 +70,9 @@ backups successfully. Persistent failures retain their last error in the catalog
   dependency. Recovery keeps retrying cleanup; the target remains blocked until
   cleanup succeeds. A published archive is preserved if a later hook fails.
 
-Progress phase `copy` includes staging/source fingerprint and checksum checks
-after rsync exits. A large tree on an HDD may spend substantial time in this phase.
+Progress phase copy measures rsync; staging_verify measures the following
+staging/source fingerprint and checksum checks. A large tree on an HDD may
+spend substantial time verifying staging.
 Timestamped file operations in the audit log show continuing progress.
 `verify` runs the external ZIP test, `content_verify` checks manifest entries,
 and `digest` computes the final archive checksum before publication.
@@ -111,3 +123,81 @@ config, state, archives, and service account. Purge removes the packaged config,
 but state/archives are still preserved. Remove backup data manually only when
 you intend to discard it. To disconnect the repository, remove its source-list
 and dedicated keyring files and run `apt-get update`.
+
+## Planning, integrity, and restoration
+
+plan and retention-plan read the catalog through a read-only SQLite connection;
+they never initialize or migrate state, configure audit logging, create archives,
+or modify source data. Pruned directories are reported once with subtree=true
+and the responsible rule. Unreadable/unsupported paths and exhausted selection
+budgets make the forecast incomplete. --target limits detailed selection output,
+not the shared-disk calculation. Historical cohorts and disabled/unmanaged
+archives still consume capacity; compression forecasts include sample counts and
+uncertainty. Read planning errors before relying on a capacity estimate.
+
+A scrub verifies archive SHA-256, ZIP CRC, and manifest content. Optional reopened
+reads synchronize and request advisory cache eviction. A failed first read stays
+a failure even when the controlled reread matches; there are no silent retries
+until success. Reports record method, phase, paths, hashes, metadata changes,
+and reread results. Evidence persists in SQLite. A scrub does not quarantine or
+delete archives. Retention preserves suspect copies, marks failed copies unhealthy,
+and postpones deletion for the target until its incident has an explicit operator
+review through incident-resolve. A reviewed corrupt archive is still preserved;
+cleanup must freshly verify healthy survivors. Publication
+verification failures preserve staging/partial evidence and suppress recapture
+retries; finally cleanup still runs. Repeated reads do not establish hardware
+health or independent correctness.
+
+Restore refuses source/state/archive overlaps, nonempty outputs, traversal,
+unsafe paths, and overwrite. Files are created through pinned parents and checked
+against manifest hashes. Symlinks are skipped by default. --safe-symlinks permits
+only relative links whose complete chain stays inside the destination; escaping
+or cyclic chains fail. Restored permissions omit special bits; modification
+times are captured. Ownership, ACLs, extended attributes, and hard-link identity
+are not captured/restored. Rehearsal samples verify the entire archive first,
+then extract a bounded file count; this still reads the full ZIP.
+
+## Policy transitions and release rollback
+
+Review retention-plan, take enough successful captures under the new policy,
+and save a transition-plan. Keep its original ZIP manifests unchanged. Applying
+the plan before not_before_ms records protection and performs no deletion.
+Apply the same file after the rollback window. Replacements must still exist
+and verify; every candidate must still match the reviewed catalog. Corrupt,
+unknown, and unreviewed archives are preserved. Separate administrative records
+and per-file deletion intentions allow interrupted migration to resume.
+
+Schema 3 cannot be opened by 0.0.x binaries. Before upgrading, stop the service
+and preserve its config and SQLite database/WAL files. Downgrading requires the
+matching saved state and config as well as the old binary; preserve any archives
+created after the upgrade for separate investigation/adoption.
+
+## Monitoring and performance
+
+report --check can be called by an explicitly configured local timer or monitoring
+script. Notification delivery belongs to that script; no credentials or default
+notification destinations are embedded. Hook environments and command arguments
+are redacted in status/job/CLI reports. JSON fields include scheduled time,
+actual dispatch, schedule and queue delay, phase durations, actual capture age,
+last source check, mandatory cleanup, and total cohort storage. Duration estimates
+include the number of successful samples (up to the latest 100 results per target).
+
+Use phase_durations_ms.copy, archive, staging_verify, verify, content_verify,
+digest, and reopened_verify to compare copying, compression, and verification;
+total_elapsed_ms includes queue waiting. Benchmark on representative selected
+data before enabling compression suffix rules or unchanged checks. The storage
+format remains an independent ZIP; incremental/content-addressed storage needs
+a later format migration and dependency-aware retention.
+
+A repeatable disposable benchmark is available in the source checkout:
+
+```bash
+python3 scripts/benchmark-compression.py \
+  --binary target/x86_64-unknown-linux-musl/release/syncthing-backup-tool \
+  --output dist/compression-benchmark.json --samples 3
+```
+
+It records copying, compression, staging and archive verification, digest, and
+total elapsed times for incompressible bytes and repeated text. These synthetic
+results characterize the development filesystem and do not replace benchmarks
+of the deployed HDD or revised selection policy.

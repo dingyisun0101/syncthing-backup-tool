@@ -72,113 +72,318 @@ impl Source {
     }
 }
 
-/// Inspect selection and metadata. rsync performs the actual data copying.
+#[derive(Debug, serde::Serialize)]
+pub struct Omission {
+    pub path: String,
+    pub reason: String,
+    pub subtree: bool,
+}
+#[derive(Debug, serde::Serialize)]
+pub struct CacheCandidate {
+    pub path: String,
+    pub reason: String,
+    pub approved: bool,
+    pub include_override: bool,
+}
+#[derive(Debug, serde::Serialize)]
+pub struct Selection {
+    pub entries: Vec<Entry>,
+    pub omitted: Vec<Omission>,
+    pub cache_candidates: Vec<CacheCandidate>,
+    pub errors: Vec<String>,
+    #[serde(skip)]
+    pub permanent_error: bool,
+    pub unmatched_exclusions: Vec<String>,
+    pub selected_bytes: u64,
+    pub file_count: usize,
+    pub entry_budget_bytes: u64,
+}
+fn protected(target: &Target, path: &Path) -> bool {
+    target
+        .include_paths
+        .iter()
+        .any(|include| path.starts_with(include) || Path::new(include).starts_with(path))
+}
+fn valid_tag(source: &Source, path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = source.open_entry(&path.join("CACHEDIR.TAG"), false) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let mut header = [0u8; 43];
+    file.read_exact(&mut header).is_ok()
+        && &header == b"Signature: 8a477f597d28d172789f06886806bc55"
+}
+fn cargo_build(source: &Source, path: &Path) -> bool {
+    use std::io::Read;
+    if path.file_name().is_none_or(|n| n != "target") || !valid_tag(source, path) {
+        return false;
+    }
+    let parent = path.parent().unwrap_or(Path::new(""));
+    if !source
+        .open_entry(&parent.join("Cargo.toml"), false)
+        .is_ok_and(|f| f.metadata().is_ok_and(|m| m.is_file()))
+    {
+        return false;
+    }
+    let Ok(file) = source.open_entry(&path.join(".rustc_info.json"), false) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let mut bytes = Vec::new();
+    if file.take(65537).read_to_end(&mut bytes).is_err() || bytes.len() > 65536 {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .is_ok_and(|v| v["rustc_fingerprint"].is_number())
+}
+/// The backup and read-only preview use this same bounded selection walk.
+pub fn inspect(
+    source: &Source,
+    target: &Target,
+    resources: &crate::config::Resources,
+) -> Result<Selection> {
+    let base = proc_path(&source.root);
+    let exclusions = target.exclusions()?;
+    let mut matches = vec![false; target.exclude_globs.len()];
+    let mut budget = MemoryBudget::new(resources);
+    let mut report = Selection {
+        entries: Vec::new(),
+        omitted: Vec::new(),
+        cache_candidates: Vec::new(),
+        errors: Vec::new(),
+        permanent_error: false,
+        unmatched_exclusions: Vec::new(),
+        selected_bytes: 0,
+        file_count: 0,
+        entry_budget_bytes: 0,
+    };
+    let mut inherited = std::collections::HashMap::<PathBuf, String>::new();
+    let mut walker = walkdir::WalkDir::new(&base)
+        .follow_links(false)
+        .max_depth(target.archive.max_depth + 1)
+        .into_iter();
+    while let Some(item) = walker.next() {
+        let item = match item {
+            Ok(item) => item,
+            Err(e) => {
+                report.errors.push(e.to_string());
+                continue;
+            }
+        };
+        let relative = item.path().strip_prefix(&base)?;
+        let Some(path) = relative.to_str() else {
+            report.errors.push("source filename is not UTF-8".into());
+            if item.file_type().is_dir() {
+                walker.skip_current_dir();
+            }
+            continue;
+        };
+        if path.len() > 4096 || path.contains('\\') {
+            report.permanent_error = true;
+            report
+                .errors
+                .push(format!("unsupported filename: {path:?}"));
+            break;
+        }
+        if let Err(e) = budget.entry(path) {
+            report.permanent_error = true;
+            report.errors.push(format!("{e:#}"));
+            break;
+        }
+        report.entry_budget_bytes = report
+            .entry_budget_bytes
+            .saturating_add(8192 + path.len() as u64 * 16);
+        let is_dir = item.depth() == 0 || item.file_type().is_dir();
+        let mut indexes = exclusions.matches(relative);
+        indexes.extend(exclusions.matches(format!("{path}/")));
+        for index in &indexes {
+            matches[*index] = true;
+        }
+        let mut reason = indexes
+            .first()
+            .map(|i| format!("exclude_globs[{}]: {}", i, target.exclude_globs[*i]));
+        if reason.is_none() {
+            reason = relative
+                .ancestors()
+                .skip(1)
+                .find_map(|parent| inherited.get(parent).cloned());
+        }
+        if is_dir && item.depth() > 0 {
+            let candidate = if target.cache.cargo_build && cargo_build(source, relative) {
+                Some("reviewed Cargo build-directory preset")
+            } else if target.cache.cachedir_tags && valid_tag(source, relative) {
+                Some("valid CACHEDIR.TAG")
+            } else {
+                None
+            };
+            if let Some(rule) = candidate {
+                let approved = target
+                    .cache
+                    .approved_paths
+                    .iter()
+                    .any(|p| Path::new(p) == relative);
+                report.cache_candidates.push(CacheCandidate {
+                    path: path.into(),
+                    reason: rule.into(),
+                    approved,
+                    include_override: protected(target, relative),
+                });
+                if approved {
+                    reason = Some(format!("cache: {rule}"));
+                }
+            }
+        }
+        if let Some(rule) = &reason {
+            if is_dir {
+                inherited.insert(relative.to_owned(), rule.clone());
+            }
+            if !protected(target, relative) && item.depth() > 0 {
+                report.omitted.push(Omission {
+                    path: path.into(),
+                    reason: rule.clone(),
+                    subtree: is_dir,
+                });
+                if is_dir {
+                    walker.skip_current_dir();
+                }
+                continue;
+            }
+        }
+        let result = (|| -> Result<Entry> {
+            ensure!(
+                item.depth().saturating_sub(usize::from(!is_dir)) <= target.archive.max_depth,
+                Permanent("max_depth exceeded".into())
+            );
+            ensure!(
+                report.entries.len() < target.archive.max_entries,
+                Permanent("max_entries exceeded".into())
+            );
+            let metadata = if item.depth() == 0 {
+                source.root.metadata()?
+            } else {
+                fs::symlink_metadata(item.path())?
+            };
+            let kind = if metadata.is_symlink() {
+                ensure!(
+                    target.symlink_policy != "reject",
+                    Permanent(format!("symlink rejected: {path}"))
+                );
+                if target.symlink_policy == "preserve" {
+                    "symlink"
+                } else {
+                    "skipped_symlink"
+                }
+            } else if metadata.is_dir() {
+                "directory"
+            } else if metadata.is_file() {
+                "file"
+            } else {
+                return Err(Permanent(format!("unsupported source entry: {path}")).into());
+            };
+            if !matches!(kind, "symlink" | "skipped_symlink") && item.depth() != 0 {
+                let opened = source.open_entry(relative, kind == "directory")?;
+                ensure!(
+                    fingerprint(&opened.metadata()?) == fingerprint(&metadata),
+                    "source entry changed during inspection: {path}"
+                );
+            }
+            let symlink_target = if kind == "symlink" {
+                Some(
+                    fs::read_link(item.path())?
+                        .to_str()
+                        .ok_or_else(|| Permanent("non-UTF-8 symlink target".into()))?
+                        .to_owned(),
+                )
+            } else {
+                None
+            };
+            Ok(Entry {
+                path: path.into(),
+                kind: kind.into(),
+                metadata: fingerprint(&metadata),
+                sha256: None,
+                symlink_target,
+            })
+        })();
+        match result {
+            Ok(entry) => {
+                if entry.kind == "file" {
+                    report.file_count += 1;
+                    report.selected_bytes =
+                        report.selected_bytes.saturating_add(entry.metadata.size);
+                }
+                if entry.kind == "skipped_symlink" {
+                    report.omitted.push(Omission {
+                        path: entry.path.clone(),
+                        reason: "symlink_policy: skip".into(),
+                        subtree: false,
+                    });
+                }
+                report.entries.push(entry);
+            }
+            Err(e) => {
+                report.permanent_error |= e.is::<Permanent>();
+                report.errors.push(format!("{path}: {e:#}"));
+                if is_dir {
+                    walker.skip_current_dir();
+                }
+            }
+        }
+        if report.selected_bytes > target.storage.max_staging_bytes {
+            report.permanent_error = true;
+            report.errors.push("max_staging_bytes exceeded".into());
+            break;
+        }
+    }
+    if let Err(e) = source.check() {
+        report.errors.push(format!("{e:#}"));
+    }
+    report.unmatched_exclusions = target
+        .exclude_globs
+        .iter()
+        .zip(matches)
+        .filter(|(_, matched)| !*matched)
+        .map(|(rule, _)| rule.clone())
+        .collect();
+    Ok(report)
+}
 pub fn inventory(
     source: &Source,
     target: &Target,
     resources: &crate::config::Resources,
 ) -> Result<Vec<Entry>> {
-    let base = proc_path(&source.root);
-    let exclusions = target.exclusions()?;
-    let mut budget = MemoryBudget::new(resources);
-    let mut entries = Vec::new();
-    let mut total = 0u64;
-    let walker = walkdir::WalkDir::new(&base)
-        .follow_links(false)
-        .max_depth(target.archive.max_depth + 1)
-        .into_iter()
-        .filter_entry(|entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            let relative = entry.path().strip_prefix(&base).unwrap_or(entry.path());
-            let path = relative.to_string_lossy();
-            !exclusions.is_match(relative) && !exclusions.is_match(format!("{path}/"))
-        });
-    for item in walker {
-        let item = item?;
-        ensure!(
-            item.depth()
-                .saturating_sub(usize::from(!item.file_type().is_dir()))
-                <= target.archive.max_depth,
-            Permanent("max_depth exceeded".into())
-        );
-        let relative = item.path().strip_prefix(&base)?;
-        let path = relative
-            .to_str()
-            .ok_or_else(|| Permanent("source filename is not UTF-8".into()))?
-            .to_owned();
-        ensure!(
-            path.len() <= 4096 && !path.contains('\\'),
-            Permanent("unsupported source-relative filename".into())
-        );
-        ensure!(
-            entries.len() < target.archive.max_entries,
-            Permanent("max_entries exceeded".into())
-        );
-        budget.entry(&path)?;
-        let metadata = if item.depth() == 0 {
-            source.root.metadata()?
-        } else {
-            fs::symlink_metadata(item.path())?
-        };
-        let kind = if metadata.is_symlink() {
-            ensure!(
-                target.symlink_policy != "reject",
-                Permanent(format!("symlink rejected: {path}"))
-            );
-            if target.symlink_policy == "preserve" {
-                "symlink"
-            } else {
-                "skipped_symlink"
-            }
-        } else if metadata.is_dir() {
-            "directory"
-        } else if metadata.is_file() {
-            "file"
-        } else {
-            return Err(Permanent(format!("unsupported source entry: {path}")).into());
-        };
-        if kind == "file" {
-            total = total
-                .checked_add(metadata.len())
-                .ok_or_else(|| Permanent("staging byte count overflow".into()))?;
-        }
-        ensure!(
-            total <= target.storage.max_staging_bytes,
-            Permanent("max_staging_bytes exceeded".into())
-        );
-        if !matches!(kind, "skipped_symlink" | "symlink") && item.depth() != 0 {
-            let opened = source.open_entry(relative, kind == "directory")?;
-            ensure!(
-                fingerprint(&opened.metadata()?) == fingerprint(&metadata),
-                "source entry changed during inspection: {path}"
-            );
-        }
-        let symlink_target = if kind == "symlink" {
-            Some(
-                fs::read_link(item.path())?
-                    .to_str()
-                    .ok_or_else(|| Permanent("non-UTF-8 symlink target".into()))?
-                    .to_owned(),
-            )
-        } else {
-            None
-        };
+    let report = inspect(source, target, resources)?;
+    if report.permanent_error {
+        return Err(Permanent(format!(
+            "source selection failed: {}",
+            report.errors.join("; ")
+        ))
+        .into());
+    }
+    ensure!(
+        report.errors.is_empty(),
+        "source selection failed: {}",
+        report.errors.join("; ")
+    );
+    for omission in &report.omitted {
+        telemetry::audit("source.entry", "excluded", json!(omission))?;
+    }
+    for candidate in &report.cache_candidates {
+        telemetry::audit("source.cache", "candidate", json!(candidate))?;
+    }
+    for entry in &report.entries {
         telemetry::audit(
             "source.entry",
             "selected",
-            json!({"path":path,"kind":kind,"bytes":metadata.len()}),
+            json!({"path":entry.path,"kind":entry.kind,"bytes":entry.metadata.size}),
         )?;
-        entries.push(Entry {
-            path,
-            kind: kind.into(),
-            metadata: fingerprint(&metadata),
-            sha256: None,
-            symlink_target,
-        });
     }
-    Ok(entries)
+    Ok(report.entries)
 }
 
 pub struct Rsync;
@@ -189,6 +394,9 @@ impl crate::api::SourceProvider for LiveDirectory {
     }
 }
 impl crate::api::SourceSession for Source {
+    fn file(&self, path: &Path) -> Result<File> {
+        self.open_entry(path, false)
+    }
     fn rooted_path(&self) -> PathBuf {
         use std::os::fd::AsRawFd;
         PathBuf::from(format!(

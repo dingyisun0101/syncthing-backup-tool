@@ -11,7 +11,7 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-pub const INTERFACE_VERSION: u32 = 2;
+pub const INTERFACE_VERSION: u32 = 3;
 pub type Monitor<'a> = &'a dyn Fn() -> Result<()>;
 
 pub struct CopyRequest<'a> {
@@ -28,6 +28,7 @@ pub trait Synchronizer: Send + Sync {
 }
 
 pub trait SourceSession: Send {
+    fn file(&self, path: &Path) -> Result<File>;
     fn rooted_path(&self) -> PathBuf;
     fn check(&self) -> Result<()>;
     fn consistency(&self) -> &str;
@@ -90,8 +91,8 @@ pub trait StorageProvider: Send + Sync {
 
 pub trait SchedulingPolicy: Send + Sync {
     fn next_for(&self, target: &Target, previous: i64, now: i64) -> Result<i64> {
-        if let Some(schedule) = &target.schedule {
-            crate::scheduler::calendar_next(schedule, now)
+        if target.manual_only || target.schedule.is_some() || target.interval_anchor.is_some() {
+            crate::scheduler::next_for(target, previous, now)
         } else {
             Ok(self.next_due(previous, now, target.backup_interval_seconds))
         }
@@ -114,6 +115,12 @@ pub trait RetentionPolicy: Send + Sync {
 }
 
 pub trait StateStore: Send + Sync {
+    fn io_activity(&self) -> Result<Vec<(String, i64, bool)>>;
+    fn set_io_activity(&self, filesystem: &str, finished_ms: i64, active: bool) -> Result<()>;
+    fn record_inspection(&self, kind: &str, report: &serde_json::Value) -> Result<()>;
+    fn inspections(&self, kind: &str) -> Result<Vec<serde_json::Value>>;
+    fn record_source_check(&self, target: &str, capture_ms: Option<i64>) -> Result<()>;
+    fn scheduled_time(&self, job: &str, scheduled_ms: i64) -> Result<()>;
     fn register_cleanup(&self, job: &Job) -> Result<()>;
     fn clear_cleanup(&self, id: &str) -> Result<()>;
     fn pending_cleanups(&self) -> Result<Vec<Job>>;

@@ -1,6 +1,9 @@
 # syncthing-backup-tool
 
-Version **0.0.4**. A Linux service that creates full, timestamped ZIP snapshots
+Version **0.1.0**. [Crates.io](https://crates.io/crates/syncthing-backup-tool)
+(`cargo install syncthing-backup-tool --locked`; rsync/zip/unzip remain required).
+
+A Linux service that creates full, timestamped ZIP snapshots
 of directories and removes older snapshots on an independent retention schedule.
 It works with any readable directory; Syncthing is a common pairing, not a dependency.
 
@@ -12,7 +15,7 @@ Requests for a busy target are skipped rather than building an unlimited backlog
 ## Install with APT
 
 The signed APT repository is hosted directly in this GitHub repository's `apt`
-branch. Release 0.0.4 provides an **amd64** package for Debian/Ubuntu systems
+branch. Release 0.1.0 provides an **amd64** package for Debian/Ubuntu systems
 with Linux **5.6 or newer**, systemd with cgroup v2, and `/proc`. The binary is statically linked
 with musl; Rust is not needed on the server.
 
@@ -37,8 +40,8 @@ APT checks signed repository metadata and package checksums; this setup uses
 `signed-by`, without disabling authentication. See [APT's authentication documentation](https://manpages.debian.org/bookworm/apt/apt-secure.8.en.html).
 
 Alternatively, download the `.deb` from the
-[v0.0.2 release](https://github.com/dingyisun0101/syncthing-backup-tool/releases/tag/v0.0.4)
-and install it with `sudo apt-get install ./syncthing-backup-tool_0.0.4_amd64.deb`.
+[v0.1.0 release](https://github.com/dingyisun0101/syncthing-backup-tool/releases/tag/v0.1.0)
+and install it with `sudo apt-get install ./syncthing-backup-tool_0.1.0_amd64.deb`.
 
 Installation creates the `syncthing-backup` service account, installs an empty
 configuration, and leaves the service stopped. Package upgrades preserve the
@@ -266,3 +269,21 @@ Set `logging.audit_file` to `/var/log/syncthing-backup-tool/operations.jsonl` fo
 persistent timestamped operation/file logs. `max_file_bytes` and `max_files`
 control rotation. Journald continues to receive summaries. Calendar schedules
 support daily/weekly local times with IANA timezones; intervals remain supported.
+
+## Planning and operational checks
+
+Version 0.1.0 adds per-disk cooldowns, offset schedules, reviewed cache policies,
+cohort/capacity previews, scrubbing, restore/rehearsal, reviewed retention
+transitions, mixed compression, and verified unchanged checks. See the
+[configuration reference](docs/configuration.md) and
+[operations guide](docs/operations.md) for fields, examples, and safety limits.
+
+```bash
+sudo -u syncthing-backup syncthing-backup-tool plan --target workplace-projects
+sudo -u syncthing-backup syncthing-backup-tool retention-plan
+sudo syncthing-backup-tool report --check
+```
+
+Scrub/restore/transition one-shot commands require the daemon to be stopped.
+Scheduled scrubs and rehearsals run inside the daemon and share its disk idle
+policy. Cache candidates remain included until their exact paths are reviewed.

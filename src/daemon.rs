@@ -93,6 +93,14 @@ pub fn validate_history(config: &Config, state: &dyn StateStore) -> Result<()> {
 }
 
 pub fn recover(instance: &Instance, config: &Config) -> Result<()> {
+    let io = crate::io_policy::Coordinator::new(instance.state.clone())?;
+    recover_coordinated(instance, config, &io)
+}
+fn recover_coordinated(
+    instance: &Instance,
+    config: &Config,
+    io: &crate::io_policy::Coordinator,
+) -> Result<()> {
     crate::hooks::recover(instance.state.as_ref())?;
     for job in instance.state.jobs(None)? {
         if job.attempts == 0 || !instance.state.is_interrupted(&job.id)? {
@@ -101,6 +109,15 @@ pub fn recover(instance: &Instance, config: &Config) -> Result<()> {
         if instance.state.cleanup_pending(&job.spec.target.id)? {
             continue;
         }
+        let filesystem = match crate::io_policy::filesystem(&job.spec.target) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        let Some(_permit) =
+            io.try_acquire(&filesystem, crate::io_policy::cooldown(config, &filesystem))?
+        else {
+            continue;
+        };
         match reconcile(instance.state.as_ref(), &job, &config.state_dir) {
             Ok(true) => (),
             Ok(false) => {
@@ -146,10 +163,12 @@ fn reconcile(state: &dyn StateStore, job: &Job, state_dir: &Path) -> Result<bool
     if let Some(snapshot) = state.intention(&job.id)?
         && destination.exists(&snapshot.filename)?
     {
-        archive::verify_snapshot(
+        crate::integrity::verify_checked(
+            state,
             destination.as_ref(),
             &snapshot,
             &job.spec.resources,
+            false,
             &AtomicBool::new(false),
         )?;
         destination.synchronize()?;
@@ -198,7 +217,8 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
     instance
         .state
         .sync_schedules(&config, chrono::Utc::now().timestamp_millis())?;
-    recover(&instance, &config)?;
+    let io = crate::io_policy::Coordinator::new(instance.state.clone())?;
+    recover_coordinated(&instance, &config, &io)?;
     ensure!(
         socket_path.is_absolute(),
         "control socket path must be absolute"
@@ -222,7 +242,7 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stop))?;
     let mut workers: HashMap<String, Worker> = HashMap::new();
     let mut cleanup: Option<(JoinHandle<Result<()>>, Arc<AtomicBool>)> = None;
-    let mut sweep_due = Instant::now();
+    let mut maintenance_due = maintenance_deadlines(instance.state.as_ref(), &config)?;
     let mut recovery_due = Instant::now() + Duration::from_secs(config.queue.retry_initial_seconds);
     let mut rotation = 0usize;
     let mut shutdown_at = None;
@@ -261,8 +281,16 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
             match result {
                 Ok(snapshot) => event(
                     "info",
-                    "snapshot committed",
-                    json!({"target":snapshot.target_id,"file":snapshot.filename,"bytes":snapshot.bytes}),
+                    if instance
+                        .state
+                        .job_status(&id)?
+                        .is_some_and(|s| s.status == "unchanged")
+                    {
+                        "source verified unchanged"
+                    } else {
+                        "snapshot committed"
+                    },
+                    json!({"target":snapshot.target_id,"job":id,"file":snapshot.filename,"bytes":snapshot.bytes,"capture_ms":snapshot.capture_ms}),
                 ),
                 Err(error) => {
                     if instance
@@ -278,18 +306,12 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                         continue;
                     }
                     if instance.state.intention(&id)?.is_some() {
-                        match reconcile(instance.state.as_ref(), &worker.job, &config.state_dir) {
-                            Ok(true) => continue,
-                            Err(e) => {
-                                event(
-                                    "error",
-                                    "publication recovery deferred",
-                                    json!({"job":id,"error":format!("{e:#}")}),
-                                );
-                                continue;
-                            }
-                            Ok(false) => (),
-                        }
+                        event(
+                            "warn",
+                            "publication recovery queued behind filesystem idle policy",
+                            json!({"job":id}),
+                        );
+                        continue;
                     }
                     let retry = Modules::from_choices(&config.backends)?.queue.retry_at(
                         &error,
@@ -308,7 +330,8 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                 }
             }
         }
-        if cleanup.as_ref().is_some_and(|(h, _)| h.is_finished()) {
+        let maintenance_finished = cleanup.as_ref().is_some_and(|(h, _)| h.is_finished());
+        if maintenance_finished {
             let (handle, _) = cleanup.take().expect("cleanup exists");
             if let Err(e) = handle
                 .join()
@@ -316,10 +339,13 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
             {
                 event(
                     "error",
-                    "retention sweep failed",
+                    "maintenance operation failed",
                     json!({"error":format!("{e:#}")}),
                 );
             }
+        }
+        if maintenance_finished {
+            maintenance_due = maintenance_deadlines(instance.state.as_ref(), &config)?;
         }
         if stopping && workers.is_empty() && cleanup.is_none() {
             break;
@@ -337,6 +363,17 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                     {
                         continue;
                     }
+                    let filesystem = match crate::io_policy::filesystem(&job.spec.target) {
+                        Ok(id) => id,
+                        Err(_) => continue,
+                    };
+                    let Some(_permit) = io.try_acquire(
+                        &filesystem,
+                        crate::io_policy::cooldown(&config, &filesystem),
+                    )?
+                    else {
+                        continue;
+                    };
                     match reconcile(instance.state.as_ref(), &job, &config.state_dir) {
                         Ok(true) => (),
                         Ok(false) => {
@@ -367,13 +404,28 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                 telemetry::audit_or_stderr("control.request", "started", json!({}));
+                let previous_intervals = (
+                    config.retention.sweep_interval_seconds,
+                    config.scrub.interval_seconds,
+                    config.rehearsal.interval_seconds,
+                );
                 let response = control(
                     &mut stream,
                     &config_path,
                     &mut config,
                     instance.state.as_ref(),
                     workers.len() + usize::from(cleanup.is_some()),
+                    &io,
                 );
+                if previous_intervals
+                    != (
+                        config.retention.sweep_interval_seconds,
+                        config.scrub.interval_seconds,
+                        config.rehearsal.interval_seconds,
+                    )
+                {
+                    maintenance_due = maintenance_deadlines(instance.state.as_ref(), &config)?;
+                }
                 telemetry::audit_or_stderr(
                     "control.request",
                     if response.is_ok() {
@@ -384,7 +436,7 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                     json!({"error":response.as_ref().err().map(|e|format!("{e:#}"))}),
                 );
                 let value = match response {
-                    Ok(v) => json!({"ok":true,"result":v}),
+                    Ok(v) => json!({"ok":true,"result":config::redacted(v)}),
                     Err(e) => json!({"ok":false,"error":format!("{e:#}")}),
                 };
                 let _ = serde_json::to_writer(&mut stream, &value);
@@ -395,7 +447,10 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
             let count = config.targets.len();
             for offset in 0..count {
                 let target = &config.targets[(rotation + offset) % count];
-                if !target.enabled || instance.state.cleanup_pending(&target.id)? {
+                if !target.enabled
+                    || target.manual_only
+                    || instance.state.cleanup_pending(&target.id)?
+                {
                     continue;
                 }
                 let due = instance.state.due(&target.id)?;
@@ -418,7 +473,8 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                         target: target.clone(),
                         resources: config.resources.clone(),
                     };
-                    instance.state.enqueue(&spec, now)?;
+                    let id = instance.state.enqueue(&spec, now)?;
+                    instance.state.scheduled_time(&id, due)?;
                 }
                 instance
                     .state
@@ -431,18 +487,6 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                 .resources
                 .max_concurrent_snapshots
                 .min(config.resources.max_worker_threads);
-            if Instant::now() >= sweep_due && cleanup.is_none() && workers.len() < slots {
-                let state = instance.state.clone();
-                let settings = config.clone();
-                let cancel = archive::never_cancel();
-                let flag = Arc::clone(&cancel);
-                cleanup = Some((
-                    thread::spawn(move || retention::sweep(state.as_ref(), &settings, &flag)),
-                    cancel,
-                ));
-                sweep_due =
-                    Instant::now() + Duration::from_secs(config.retention.sweep_interval_seconds);
-            }
             for mut job in instance.state.jobs(Some(now))? {
                 if workers.len() + usize::from(cleanup.is_some()) >= slots {
                     break;
@@ -462,6 +506,27 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                     )?;
                     continue;
                 }
+                let filesystem = match crate::io_policy::filesystem(&job.spec.target) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        event(
+                            "debug",
+                            "destination unavailable; dispatch delayed",
+                            json!({"job":job.id,"error":format!("{e:#}")}),
+                        );
+                        continue;
+                    }
+                };
+                let seconds = crate::io_policy::cooldown(&config, &filesystem).max(
+                    job.spec
+                        .target
+                        .storage
+                        .cooldown_seconds
+                        .unwrap_or(config.io_cooldown_seconds),
+                );
+                let Some(permit) = io.try_acquire(&filesystem, seconds)? else {
+                    continue;
+                };
                 job.spec.resources = config.resources.clone();
                 instance.state.dispatch(&job)?;
                 job.attempts += 1;
@@ -471,6 +536,7 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                 let cancel = archive::never_cancel();
                 let flag = Arc::clone(&cancel);
                 let handle = thread::spawn(move || {
+                    let _permit = permit;
                     snapshot::create(&worker_job, state.as_ref(), &state_dir, &flag)
                 });
                 workers.insert(
@@ -481,6 +547,123 @@ pub fn run(config_path: &Path, socket_path: &Path) -> Result<()> {
                         cancel,
                     },
                 );
+            }
+            if cleanup.is_none() && workers.len() < slots {
+                let mut disks = std::collections::BTreeMap::<String, Config>::new();
+                for target in config.targets.iter().filter(|t| t.enabled) {
+                    let Ok(filesystem) = crate::io_policy::filesystem(target) else {
+                        continue;
+                    };
+                    let disk = disks.entry(filesystem).or_insert_with(|| {
+                        let mut c = config.clone();
+                        c.targets.clear();
+                        c
+                    });
+                    disk.targets.push(target.clone());
+                }
+                'dispatch_maintenance: for (filesystem, settings) in disks {
+                    for (kind, interval) in [
+                        ("retention", Some(config.retention.sweep_interval_seconds)),
+                        ("scrub", config.scrub.interval_seconds),
+                        ("rehearsal", config.rehearsal.interval_seconds),
+                    ] {
+                        let Some(interval) = interval else {
+                            continue;
+                        };
+                        let key = (filesystem.clone(), kind.to_owned());
+                        if kind != "retention" && !maintenance_due.contains_key(&key) {
+                            let next = chrono::Utc::now()
+                                .timestamp_millis()
+                                .saturating_add(interval as i64 * 1000);
+                            instance.state.record_inspection("maintenance",&json!({"id":format!("{kind}:{filesystem}"),"kind":kind,"filesystem":filesystem,"finished_ms":chrono::Utc::now().timestamp_millis(),"next_due_ms":next,"status":"waiting_first_run"}))?;
+                            maintenance_due.insert(
+                                key.clone(),
+                                Instant::now() + Duration::from_secs(interval),
+                            );
+                        }
+                        if maintenance_due
+                            .get(&key)
+                            .is_some_and(|due| Instant::now() < *due)
+                        {
+                            continue;
+                        }
+                        if kind == "retention" {
+                            let catalog = instance.state.catalog()?;
+                            let preview =
+                                crate::planning::retention_preview(&settings, &catalog, now)?;
+                            if !catalog
+                                .iter()
+                                .any(|(s, _, d)| *d && crate::planning::managed(&settings, s))
+                                && !preview["cohorts"].as_array().unwrap().iter().any(|c| {
+                                    !c["deletion_candidates"].as_array().unwrap().is_empty()
+                                })
+                            {
+                                maintenance_due
+                                    .insert(key, Instant::now() + Duration::from_secs(interval));
+                                continue;
+                            }
+                        }
+                        let mut reservations = vec![(
+                            filesystem.clone(),
+                            crate::io_policy::cooldown(&config, &filesystem),
+                        )];
+                        if kind == "rehearsal"
+                            && let Some(scratch) = &config.rehearsal.scratch_dir
+                        {
+                            let other = crate::io_policy::filesystem_path(scratch)?;
+                            if other != filesystem {
+                                reservations.push((
+                                    other.clone(),
+                                    crate::io_policy::cooldown(&config, &other),
+                                ));
+                            }
+                        }
+                        let Some(permits) = io.try_acquire_all(&reservations)? else {
+                            continue;
+                        };
+                        let state = instance.state.clone();
+                        let flag = archive::never_cancel();
+                        let cancel = flag.clone();
+                        let settings = settings.clone();
+                        let filesystem = filesystem.clone();
+                        cleanup = Some((
+                            thread::spawn(move || {
+                                let _permits = permits;
+                                let result = match kind {
+                                    "retention" => {
+                                        retention::sweep(state.as_ref(), &settings, &flag)
+                                    }
+                                    "scrub" => {
+                                        crate::integrity::scrub(state.as_ref(), &settings, &flag)
+                                            .and_then(|r| {
+                                                ensure!(
+                                                    r["healthy"] == true,
+                                                    "scrub detected failures"
+                                                );
+                                                Ok(())
+                                            })
+                                    }
+                                    "rehearsal" => {
+                                        crate::restore::rehearse(state.as_ref(), &settings, &flag)
+                                            .and_then(|r| {
+                                                ensure!(
+                                                    r["healthy"] == true,
+                                                    "rehearsal detected failures"
+                                                );
+                                                Ok(())
+                                            })
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                state.record_inspection("maintenance",&json!({"id":format!("{kind}:{filesystem}"),"kind":kind,"filesystem":filesystem,"finished_ms":chrono::Utc::now().timestamp_millis(),"next_due_ms":chrono::Utc::now().timestamp_millis().saturating_add(interval as i64*1000),"status":"finished","healthy":result.is_ok(),"error":result.as_ref().err().map(|e|format!("{e:#}"))}))?;
+                                result
+                            }),
+                            cancel,
+                        ));
+                        maintenance_due.insert(key, Instant::now() + Duration::from_secs(interval));
+                        break 'dispatch_maintenance;
+                    }
+                }
             }
         }
         thread::sleep(Duration::from_millis(200));
@@ -495,6 +678,7 @@ fn control(
     config: &mut Config,
     state: &dyn StateStore,
     running: usize,
+    io: &crate::io_policy::Coordinator,
 ) -> Result<Value> {
     let mut request = String::new();
     stream.take(4096).read_to_string(&mut request)?;
@@ -568,7 +752,11 @@ fn control(
     }
 
     match request.trim() {
-        "status" => state.status(config),
+        "status" => {
+            let mut result = state.status(config)?;
+            result["io"] = io.status(config);
+            Ok(result)
+        }
         "reload" => {
             let candidate = config::load(path)?;
             ensure!(
@@ -591,20 +779,6 @@ fn control(
             let logging = telemetry::prepare(&candidate.logging)?;
             let now = chrono::Utc::now().timestamp_millis();
             state.sync_schedules(&candidate, now)?;
-            for target in &candidate.targets {
-                if config
-                    .targets
-                    .iter()
-                    .find(|t| t.id == target.id)
-                    .is_some_and(|old| {
-                        serde_json::to_value(&old.schedule).ok()
-                            != serde_json::to_value(&target.schedule).ok()
-                            || old.backup_interval_seconds != target.backup_interval_seconds
-                    })
-                {
-                    state.advance(&target.id, crate::scheduler::next_for(target, now, now)?)?;
-                }
-            }
 
             telemetry::activate(logging)?;
             *config = candidate;
@@ -656,4 +830,36 @@ fn targets_count(config: &Config, target: Option<&str>) -> usize {
         .iter()
         .filter(|t| t.enabled && target.is_none_or(|id| id == t.id))
         .count()
+}
+
+fn maintenance_deadlines(
+    state: &dyn StateStore,
+    config: &Config,
+) -> Result<HashMap<(String, String), Instant>> {
+    let mut deadlines = HashMap::new();
+    for record in state.inspections("maintenance")? {
+        if let (Some(filesystem), Some(kind), Some(finished)) = (
+            record["filesystem"].as_str(),
+            record["kind"].as_str(),
+            record["finished_ms"].as_i64(),
+        ) {
+            let interval = match kind {
+                "retention" => Some(config.retention.sweep_interval_seconds),
+                "scrub" => config.scrub.interval_seconds,
+                "rehearsal" => config.rehearsal.interval_seconds,
+                _ => None,
+            };
+            if let Some(interval) = interval {
+                let remaining = finished
+                    .saturating_add(interval as i64 * 1000)
+                    .saturating_sub(chrono::Utc::now().timestamp_millis())
+                    .max(0) as u64;
+                deadlines.insert(
+                    (filesystem.into(), kind.into()),
+                    Instant::now() + Duration::from_millis(remaining),
+                );
+            }
+        }
+    }
+    Ok(deadlines)
 }

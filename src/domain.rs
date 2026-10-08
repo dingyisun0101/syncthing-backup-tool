@@ -69,6 +69,8 @@ pub struct Snapshot {
     pub capture_ms: i64,
     pub filename: String,
     pub bytes: u64,
+    #[serde(default)]
+    pub selected_bytes: Option<u64>,
     pub sha256: String,
     pub target: Target,
 }
@@ -108,12 +110,19 @@ pub struct JobStatus {
     pub attempts: u32,
     pub error: Option<String>,
     pub snapshot: Option<Snapshot>,
+    #[serde(default)]
+    pub metrics: serde_json::Value,
 }
 impl JobStatus {
     pub fn terminal(&self) -> bool {
         matches!(
             self.status.as_str(),
-            "succeeded" | "failed" | "skipped" | "cleanup_failed" | "completed_with_hook_failure"
+            "succeeded"
+                | "unchanged"
+                | "failed"
+                | "skipped"
+                | "cleanup_failed"
+                | "completed_with_hook_failure"
         )
     }
 }

@@ -26,6 +26,12 @@ pub struct Config {
     #[serde(default)]
     pub retention: SweepConfig,
     #[serde(default)]
+    pub io_cooldown_seconds: u64,
+    #[serde(default)]
+    pub scrub: ScrubConfig,
+    #[serde(default)]
+    pub rehearsal: RehearsalConfig,
+    #[serde(default)]
     pub logging: Logging,
     pub targets: Vec<Target>,
 }
@@ -142,6 +148,8 @@ pub struct Target {
     pub id: String,
     #[serde(default = "yes")]
     pub enabled: bool,
+    #[serde(default)]
+    pub manual_only: bool,
     pub source_dir: PathBuf,
     pub destination_dir: PathBuf,
     #[serde(default)]
@@ -150,10 +158,20 @@ pub struct Target {
     pub required_destination_mount: Option<PathBuf>,
     #[serde(default = "interval")]
     pub backup_interval_seconds: u64,
+    #[serde(default)]
+    pub interval_anchor: Option<String>,
     #[serde(default = "yes")]
     pub run_on_startup: bool,
     #[serde(default)]
     pub exclude_globs: Vec<String>,
+    #[serde(default)]
+    pub include_paths: Vec<String>,
+    #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
+    pub skip_unchanged: bool,
+    #[serde(default)]
+    pub max_capture_age_seconds: Option<u64>,
     #[serde(default = "reject")]
     pub symlink_policy: String,
     #[serde(default)]
@@ -208,11 +226,34 @@ fn hook_timeout() -> u64 {
 fn hook_fail() -> String {
     "fail_job".into()
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    pub cachedir_tags: bool,
+    pub cargo_build: bool,
+    pub approved_paths: Vec<String>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScrubConfig {
+    pub interval_seconds: Option<u64>,
+    pub reopened_read: bool,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RehearsalConfig {
+    pub interval_seconds: Option<u64>,
+    pub scratch_dir: Option<PathBuf>,
+    pub sample_files: Option<usize>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CalendarSchedule {
     pub frequency: String,
+    #[serde(default)]
     pub time: String,
+    #[serde(default)]
+    pub times: Vec<String>,
     pub timezone: String,
     #[serde(default)]
     pub weekday: Option<String>,
@@ -222,6 +263,8 @@ pub struct CalendarSchedule {
 #[serde(default, deny_unknown_fields)]
 pub struct ArchiveConfig {
     pub compression: String,
+    pub store_extensions: Vec<String>,
+    pub reopened_verification: bool,
     pub compression_level: i64,
     pub max_archive_bytes: u64,
     pub max_entries: usize,
@@ -231,6 +274,8 @@ impl Default for ArchiveConfig {
     fn default() -> Self {
         Self {
             compression: "deflate".into(),
+            store_extensions: Vec::new(),
+            reopened_verification: false,
             compression_level: 6,
             max_archive_bytes: 100 * 1024 * 1024 * 1024,
             max_entries: 1_000_000,
@@ -244,12 +289,14 @@ impl Default for ArchiveConfig {
 pub struct StorageConfig {
     pub min_free_bytes: u64,
     pub max_staging_bytes: u64,
+    pub cooldown_seconds: Option<u64>,
 }
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             min_free_bytes: 10 * 1024 * 1024 * 1024,
             max_staging_bytes: 500 * 1024 * 1024 * 1024,
+            cooldown_seconds: None,
         }
     }
 }
@@ -330,6 +377,41 @@ impl Config {
         ensure!(self.config_version == 1, "unsupported config_version");
         crate::backends::Modules::from_choices(&self.backends)?;
         resolved(&self.state_dir)?;
+        ensure!(
+            self.io_cooldown_seconds <= 86400,
+            "io_cooldown_seconds must be 0..86400"
+        );
+        for interval in [self.scrub.interval_seconds, self.rehearsal.interval_seconds]
+            .into_iter()
+            .flatten()
+        {
+            ensure!(
+                (1..=31_536_000).contains(&interval),
+                "invalid inspection interval"
+            );
+        }
+        ensure!(
+            self.rehearsal.sample_files != Some(0),
+            "rehearsal sample_files must be positive or null"
+        );
+        ensure!(
+            self.rehearsal.interval_seconds.is_none() || self.rehearsal.scratch_dir.is_some(),
+            "scheduled rehearsal requires scratch_dir"
+        );
+        if let Some(scratch) = &self.rehearsal.scratch_dir {
+            resolved(scratch)?;
+            ensure!(
+                !overlap(scratch, &self.state_dir)?,
+                "rehearsal scratch overlaps state"
+            );
+            for target in &self.targets {
+                ensure!(
+                    !overlap(scratch, &target.source_dir)?
+                        && !overlap(scratch, &target.destination_dir)?,
+                    "rehearsal scratch overlaps target data"
+                );
+            }
+        }
         ensure!(
             self.shutdown_grace_seconds > 0 && self.shutdown_grace_seconds <= 86400,
             "shutdown_grace_seconds must be 1..86400"
@@ -459,6 +541,47 @@ impl Config {
                 "optional retention limits must be positive or null"
             );
             t.exclusions()?;
+            for path in t.include_paths.iter().chain(&t.cache.approved_paths) {
+                ensure!(
+                    !path.is_empty()
+                        && path.len() <= 4096
+                        && !path.contains('\\')
+                        && Path::new(path)
+                            .components()
+                            .all(|c| matches!(c, std::path::Component::Normal(_))),
+                    "include/cache paths must be nonempty source-relative paths"
+                );
+            }
+            ensure!(
+                t.storage.cooldown_seconds.is_none_or(|s| s <= 86400),
+                "storage.cooldown_seconds must be 0..86400"
+            );
+            ensure!(
+                t.max_capture_age_seconds != Some(0),
+                "max_capture_age_seconds must be positive"
+            );
+            ensure!(
+                !t.skip_unchanged || t.max_capture_age_seconds.is_some(),
+                "skip_unchanged requires max_capture_age_seconds to bound capture age"
+            );
+            for suffix in &t.archive.store_extensions {
+                ensure!(
+                    suffix.starts_with('.')
+                        && suffix.len() <= 32
+                        && suffix
+                            .chars()
+                            .all(|c| c == '.' || c.is_ascii_alphanumeric()),
+                    "store_extensions must be simple dot-prefixed suffixes"
+                );
+            }
+            ensure!(
+                t.schedule.is_none() || t.interval_anchor.is_none(),
+                "calendar schedule and interval_anchor are mutually exclusive"
+            );
+            if let Some(anchor) = &t.interval_anchor {
+                chrono::DateTime::parse_from_rfc3339(anchor)
+                    .context("interval_anchor must be RFC3339 with explicit offset")?;
+            }
             ensure!(
                 ["live", "application_quiesced"].contains(&t.consistency.as_str()),
                 "invalid consistency mode"
@@ -558,4 +681,47 @@ impl Target {
         ))?;
         Ok(hex::encode(Sha256::digest(bytes)))
     }
+}
+
+/// Reports expose settings without hook environment values or command arguments.
+pub fn redacted(mut value: serde_json::Value) -> serde_json::Value {
+    fn walk(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(hooks) = object.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+                    for phase in hooks.values_mut() {
+                        if let Some(hooks) = phase.as_array_mut() {
+                            for hook in hooks {
+                                if let Some(environment) =
+                                    hook.get_mut("environment").and_then(|e| e.as_object_mut())
+                                {
+                                    for v in environment.values_mut() {
+                                        *v = "<redacted>".into();
+                                    }
+                                }
+                                if let Some(command) =
+                                    hook.get_mut("command").and_then(|c| c.as_array_mut())
+                                {
+                                    for arg in command.iter_mut().skip(1) {
+                                        *arg = "<redacted>".into();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for item in object.values_mut() {
+                    walk(item);
+                }
+            }
+            serde_json::Value::Array(array) => {
+                for item in array {
+                    walk(item);
+                }
+            }
+            _ => (),
+        }
+    }
+    walk(&mut value);
+    value
 }

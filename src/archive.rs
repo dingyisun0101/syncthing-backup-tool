@@ -19,6 +19,24 @@ use std::{
 };
 use zip::ZipArchive;
 
+#[derive(Debug, serde::Serialize)]
+pub struct Mismatch {
+    pub phase: String,
+    pub path: String,
+    pub expected: String,
+    pub actual: String,
+}
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} mismatch at {}: expected {}, actual {}",
+            self.phase, self.path, self.expected, self.actual
+        )
+    }
+}
+impl std::error::Error for Mismatch {}
+
 pub fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     ensure!(!cancel.load(Ordering::Relaxed), "backup cancelled");
     Ok(())
@@ -78,6 +96,14 @@ pub fn verify(
         check_cancel(cancel)?;
         allowance.entry(&entry.path)?;
         ensure!(paths.insert(&entry.path), "duplicate manifest path");
+        if entry.path.is_empty() {
+            ensure!(
+                entry.kind == "directory",
+                "empty non-directory manifest path"
+            );
+        } else {
+            crate::restore::safe_relative(&entry.path)?;
+        }
         ensure!(
             !PathBuf::from(&entry.path).is_absolute()
                 && !Path::new(&entry.path)
@@ -144,11 +170,16 @@ pub fn verify(
                 size += n as u64;
                 hash.update(&buffer[..n]);
             }
-            ensure!(
-                size == entry.metadata.size && Some(hex::encode(hash.finalize())) == entry.sha256,
-                "archive content checksum mismatch: {}",
-                entry.path
-            );
+            let actual = hex::encode(hash.finalize());
+            if size != entry.metadata.size || Some(&actual) != entry.sha256.as_ref() {
+                return Err(Mismatch {
+                    phase: "manifest_content".into(),
+                    path: entry.path.clone(),
+                    expected: entry.sha256.clone().unwrap_or_default(),
+                    actual,
+                }
+                .into());
+            }
         }
         crate::telemetry::audit(
             "archive.entry.verify",
@@ -185,10 +216,16 @@ pub fn verify_snapshot(
         file.metadata()?.len() == snapshot.bytes,
         "archive size changed"
     );
-    ensure!(
-        digest(file, resources.io_buffer_bytes, cancel)? == snapshot.sha256,
-        "archive digest changed"
-    );
+    let actual = digest(file, resources.io_buffer_bytes, cancel)?;
+    if actual != snapshot.sha256 {
+        return Err(Mismatch {
+            phase: "archive_digest".into(),
+            path: snapshot.filename.clone(),
+            expected: snapshot.sha256.clone(),
+            actual,
+        }
+        .into());
+    }
     verify(
         destination.archive(&snapshot.filename)?,
         resources,
@@ -222,6 +259,14 @@ impl crate::api::Archiver for InfoZip {
                 "-0".to_owned()
             } else {
                 format!("-{}", request.target.archive.compression_level)
+            })
+            .args(if request.target.archive.store_extensions.is_empty() {
+                Vec::new()
+            } else {
+                vec![
+                    "-n".to_owned(),
+                    request.target.archive.store_extensions.join(":"),
+                ]
             })
             .arg(request.output)
             .args(["data", "meta"]);

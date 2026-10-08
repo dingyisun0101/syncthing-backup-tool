@@ -1,5 +1,19 @@
 # Releases and APT repository maintenance
 
+## 0.1.0
+
+Adds durable per-filesystem idle periods, multiple calendar slots, anchored elapsed
+intervals, manual-only schedules, read-only selection/shared-capacity and cohort
+retention planning, reviewed cache exclusion with include protection, independent
+scrubbing and integrity evidence, reviewed resumable cohort retirement with a
+rollback window, verified isolated restore and rehearsals, compression suffix
+selection, strongly verified unchanged checks with bounded capture age, and
+JSON health/phase reporting. SQLite schema 3 preserves old schedules and archives.
+Mandatory cleanup bypasses idle waiting. Integrity incidents preserve evidence
+and block associated destructive cleanup.
+
+Crates.io: https://crates.io/crates/syncthing-backup-tool/0.1.0
+
 ## 0.0.4
 
 Rejects audit/rotation paths that overlap state, current targets, historical
@@ -41,7 +55,7 @@ Signing-key fingerprint: **`6872B71D4A81920AF5D4B1D04D12FAACD2545826`**.
 sudo apt-get install build-essential musl-tools python3 dpkg-dev gnupg rsync zip unzip util-linux
 rustup target add x86_64-unknown-linux-musl
 scripts/build-deb.sh
-dpkg-deb --info dist/syncthing-backup-tool_0.0.4_amd64.deb
+dpkg-deb --info dist/syncthing-backup-tool_0.1.0_amd64.deb
 ```
 
 The script builds locked dependencies, uses a static musl binary, installs
@@ -84,10 +98,17 @@ source lists or install packages:
 ```bash
 python3 scripts/verify-apt.py \
   --fingerprint 6872B71D4A81920AF5D4B1D04D12FAACD2545826 \
-  --expected-package dist/syncthing-backup-tool_0.0.4_amd64.deb
+  --expected-package dist/syncthing-backup-tool_0.1.0_amd64.deb
 ```
 
 Tag the tested source and upload the package/checksums/public key to its GitHub
-release. GitHub hosts package artifacts; this release is not a crates.io upload.
+release. GitHub hosts package artifacts. Version 0.1.0 is also published to crates.io:
+
+```bash
+cargo publish --locked --dry-run
+cargo publish --locked
+```
+
+Cargo registry credentials must stay outside the checkout.
 The CI workflow validates Rust and builds a Debian artifact, but does not receive
 or use the private signing key. Publication is an explicit maintainer action.
