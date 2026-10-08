@@ -1,0 +1,5 @@
+{
+  "config_version": 1,
+  "state_dir": "/var/lib/syncthing-backup-tool",
+  "targets": []
+}

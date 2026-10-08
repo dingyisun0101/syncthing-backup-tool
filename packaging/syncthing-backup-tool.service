@@ -1,0 +1,32 @@
+[Unit]
+Description=Scheduled verified ZIP directory snapshots
+Documentation=https://github.com/dingyisun0101/syncthing-backup-tool
+After=local-fs.target
+ConditionPathExists=/etc/syncthing-backup-tool/config.json
+
+[Service]
+Type=simple
+User=syncthing-backup
+Group=syncthing-backup
+Environment=SYNCTHING_BACKUP_SYSTEMD=1
+ExecStart=/usr/bin/syncthing-backup-tool --config /etc/syncthing-backup-tool/config.json run
+ExecReload=/usr/bin/syncthing-backup-tool reload
+StateDirectory=syncthing-backup-tool
+StateDirectoryMode=0700
+RuntimeDirectory=syncthing-backup-tool
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90
+MemoryMax=536870912
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

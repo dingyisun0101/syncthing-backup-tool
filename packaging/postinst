@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+if [ "${1:-}" = configure ]; then
+    if ! getent group syncthing-backup >/dev/null; then
+        addgroup --system syncthing-backup
+    fi
+    if ! getent passwd syncthing-backup >/dev/null; then
+        adduser --system --ingroup syncthing-backup --home /var/lib/syncthing-backup-tool \
+            --no-create-home --disabled-login --shell /usr/sbin/nologin syncthing-backup
+    fi
+    install -d -o root -g syncthing-backup -m 0750 /etc/syncthing-backup-tool
+    install -d -o syncthing-backup -g syncthing-backup -m 0700 /var/lib/syncthing-backup-tool
+    if [ -f /etc/syncthing-backup-tool/config.json ]; then
+        chown root:syncthing-backup /etc/syncthing-backup-tool/config.json
+        chmod 0640 /etc/syncthing-backup-tool/config.json
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+    fi
+fi

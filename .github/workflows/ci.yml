@@ -1,0 +1,26 @@
+name: CI
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools rsync zip unzip
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: scripts/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian-package
+          path: dist/*.deb

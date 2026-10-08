@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    remove|deconfigure)
+        if command -v deb-systemd-invoke >/dev/null 2>&1; then
+            deb-systemd-invoke stop syncthing-backup-tool.service || true
+        fi
+        ;;
+esac
